@@ -20,6 +20,7 @@ import base64
 import io
 import json
 import logging
+import math
 import os
 import queue
 import struct
@@ -405,9 +406,10 @@ class State:
     RECORDING  = "recording"  # grabando comando de voz
     PROCESSING = "processing" # enviando al servidor
 
-state      = State.IDLE
-paused     = False
-state_lock = threading.Lock()
+state         = State.IDLE
+paused        = False
+state_lock    = threading.Lock()
+JARVIS_VOLUME: float = 1.0   # 0.0–1.0, controlado desde el panel de control
 
 send_queue        : queue.Queue = queue.Queue()
 action_queue      : queue.Queue = queue.Queue()
@@ -762,7 +764,7 @@ def action_loop():
                 arr, sr = sf.read(tmp)
                 os.unlink(tmp)
                 log.info("Reproduciendo respuesta de Jarvis...")
-                sd.play(arr, sr)
+                sd.play(arr * float(JARVIS_VOLUME), sr)
                 sd.wait()
             except Exception as e:
                 log.error(f"Error reproduciendo audio: {e}")
@@ -837,59 +839,466 @@ def _execute_action(act: dict, pyautogui):
         except Exception as e:
             log.debug(f"notify error: {e}")
 
-# ── icono del system tray ─────────────────────────────────────────────────────
-def build_icon():
-    """Genera un icono 64×64 minimalista para la bandeja."""
-    from PIL import Image, ImageDraw, ImageFont
-    img  = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    # fondo circular azul oscuro
-    draw.ellipse([2, 2, 62, 62], fill=(20, 30, 80, 255))
-    # letra J blanca
-    draw.text((22, 14), "J", fill=(255, 255, 255, 255))
-    return img
+# ── Panel de control flotante ─────────────────────────────────────────────────
 
-def create_tray(cfg: dict):
-    """Crea y arranca el icono en la bandeja del sistema."""
-    try:
-        import pystray
-        from PIL import Image
-    except ImportError:
-        log.warning("pystray/Pillow no disponibles — sin icono en bandeja")
-        return None
+class SettingsPanel:
+    """Ventana modal de configuración avanzada (Audio, Cámara, Servidor)."""
 
-    global paused
+    BG   = "#0a0a1a"
+    CYAN = "#00d4ff"
 
-    def on_pause(icon, item):
+    def __init__(self, parent, cfg: dict):
+        import tkinter as tk
+        import tkinter.ttk as ttk
+
+        self.cfg = cfg
+        self.win = tk.Toplevel(parent)
+        self.win.title("Configuración — J.A.R.V.I.S.")
+        self.win.resizable(False, False)
+        self.win.configure(bg=self.BG)
+        self.win.grab_set()
+
+        _gui_style(self.win)
+
+        W, H = 460, 560
+        px = parent.winfo_rootx()
+        py = parent.winfo_rooty()
+        self.win.geometry(f"{W}x{H}+{max(0, px-W-10)}+{py}")
+
+        self._build(tk, ttk)
+
+    def _build(self, tk, ttk):
+        win = self.win
+        cfg = self.cfg
+        pad = {"padx": 20, "pady": 4}
+
+        ttk.Label(win, text="⚙  Configuración", style="Title.TLabel").pack(pady=(14, 2))
+        ttk.Label(win, text="Los cambios se aplican al reiniciar", style="Sub.TLabel").pack(pady=(0, 8))
+
+        nb = ttk.Notebook(win)
+        nb.pack(fill="both", expand=True, padx=10, pady=2)
+
+        # ───── Pestaña Audio ─────────────────────────────────────────────────
+        t_audio = ttk.Frame(nb)
+        nb.add(t_audio, text="🎙️  Audio")
+
+        ttk.Label(t_audio, text="Modelo wake word").pack(anchor="w", **pad)
+        self._ww_model = tk.StringVar(value=cfg.get("wakeword_model", "hey_jarvis"))
+        ttk.Entry(t_audio, textvariable=self._ww_model, width=36).pack(padx=20, anchor="w")
+        ttk.Label(t_audio, text="(ej: hey_jarvis, alexa, hey_mycroft)",
+                  style="Sub.TLabel").pack(anchor="w", padx=20)
+
+        self._ww_thresh_lbl_var = tk.StringVar(
+            value=f"Umbral wake word  ({cfg.get('wakeword_threshold', 0.5):.2f})")
+        ttk.Label(t_audio, textvariable=self._ww_thresh_lbl_var).pack(anchor="w", **pad)
+        self._ww_thresh = tk.DoubleVar(value=float(cfg.get("wakeword_threshold", 0.5)))
+
+        def _thresh_trace(*_):
+            self._ww_thresh_lbl_var.set(
+                f"Umbral wake word  ({self._ww_thresh.get():.2f})")
+        self._ww_thresh.trace_add("write", _thresh_trace)
+
+        ttk.Scale(t_audio, from_=0.1, to=0.9, variable=self._ww_thresh,
+                  orient="horizontal", length=220).pack(padx=20, anchor="w")
+
+        ttk.Label(t_audio, text="Micrófonos activos").pack(anchor="w", **pad)
+        mic_card = ttk.Frame(t_audio, style="Card.TFrame")
+        mic_card.pack(fill="x", padx=20, pady=2)
+
+        self._mic_vars: dict[int, tk.BooleanVar] = {}
+        sel_mics = set(cfg.get("mic_devices",
+                               [cfg["mic_device"]] if cfg.get("mic_device") is not None else []))
+        try:
+            import sounddevice as sd
+            mics = [(i, d["name"]) for i, d in enumerate(sd.query_devices())
+                    if d["max_input_channels"] > 0]
+        except Exception:
+            mics = []
+        for idx, name in mics:
+            v = tk.BooleanVar(value=(idx in sel_mics))
+            ttk.Checkbutton(mic_card, text=f"{name[:40]}",
+                            variable=v).pack(anchor="w", padx=8, pady=1)
+            self._mic_vars[idx] = v
+
+        ttk.Label(t_audio, text="Altavoz").pack(anchor="w", **pad)
+        try:
+            spks = [(i, d["name"]) for i, d in enumerate(sd.query_devices())
+                    if d["max_output_channels"] > 0]
+        except Exception:
+            spks = []
+        self._spk_names   = ["— predeterminado —"] + [n for _, n in spks]
+        self._spk_indices = [None] + [i for i, _ in spks]
+        self._spk_var = tk.StringVar()
+        cur_spk = cfg.get("speaker_device")
+        pre = next((j + 1 for j, (i, _) in enumerate(spks) if i == cur_spk), 0)
+        spk_cb = ttk.Combobox(t_audio, textvariable=self._spk_var,
+                              values=self._spk_names, state="readonly", width=40)
+        spk_cb.current(pre)
+        spk_cb.pack(padx=20, anchor="w", pady=(0, 4))
+
+        # ───── Pestaña Cámara ────────────────────────────────────────────────
+        t_cam = ttk.Frame(nb)
+        nb.add(t_cam, text="📷  Cámara")
+
+        ttk.Label(t_cam, text="Cámaras activas").pack(anchor="w", **pad)
+        cam_card = ttk.Frame(t_cam, style="Card.TFrame")
+        cam_card.pack(fill="x", padx=20, pady=2)
+
+        self._cam_vars: dict[int, tk.BooleanVar] = {}
+        sel_cams = set(cfg.get("webcam_devices",
+                               [cfg["webcam_device"]] if cfg.get("webcam_device") is not None else []))
+        try:
+            import cv2
+            webcams = []
+            for idx in range(6):
+                cap = cv2.VideoCapture(idx)
+                if cap.isOpened():
+                    w_ = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    h_ = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    webcams.append((idx, f"Cámara {idx}  ({w_}x{h_})"))
+                    cap.release()
+        except ImportError:
+            webcams = []
+        for idx, name in webcams:
+            v = tk.BooleanVar(value=(idx in sel_cams))
+            ttk.Checkbutton(cam_card, text=name, variable=v).pack(anchor="w", padx=8, pady=1)
+            self._cam_vars[idx] = v
+
+        if not webcams:
+            ttk.Label(cam_card, text="No se detectaron cámaras",
+                      style="Sub.TLabel").pack(padx=8, pady=4)
+
+        self._webcam_send = tk.BooleanVar(value=cfg.get("webcam_on_send", False))
+        ttk.Checkbutton(t_cam,
+                        text="Enviar imagen de webcam con cada comando",
+                        variable=self._webcam_send).pack(anchor="w", padx=20, pady=8)
+
+        # ───── Pestaña Servidor ──────────────────────────────────────────────
+        t_srv = ttk.Frame(nb)
+        nb.add(t_srv, text="🌐  Servidor")
+
+        ttk.Label(t_srv, text="IP del servidor DGX").pack(anchor="w", **pad)
+        self._srv_ip = tk.StringVar(value=cfg.get("server_ip", "192.168.1.129"))
+        ttk.Entry(t_srv, textvariable=self._srv_ip, width=26).pack(padx=20, anchor="w")
+
+        ttk.Label(t_srv, text="Puerto WebSocket").pack(anchor="w", **pad)
+        self._srv_port = tk.StringVar(value=str(cfg.get("server_port", 8765)))
+        ttk.Entry(t_srv, textvariable=self._srv_port, width=12).pack(padx=20, anchor="w")
+
+        # ── guardar ──────────────────────────────────────────────────────────
+        self._status = tk.StringVar(value="")
+        ttk.Label(win, textvariable=self._status, style="Sub.TLabel").pack(pady=2)
+        ttk.Button(win, text="  Guardar  ", style="Cyan.TButton",
+                   command=self._save).pack(pady=(4, 14))
+
+    def _save(self):
+        cfg = self.cfg
+        cfg["wakeword_model"]     = self._ww_model.get().strip()
+        cfg["wakeword_threshold"] = round(float(self._ww_thresh.get()), 2)
+
+        sel_mics = [i for i, v in self._mic_vars.items() if v.get()]
+        cfg["mic_devices"] = sel_mics
+        cfg["mic_device"]  = sel_mics[0] if sel_mics else None
+
+        sel_cams = [i for i, v in self._cam_vars.items() if v.get()]
+        cfg["webcam_devices"] = sel_cams
+        cfg["webcam_device"]  = sel_cams[0] if sel_cams else None
+        cfg["webcam_on_send"] = self._webcam_send.get()
+
+        try:
+            sel = self._spk_var.get()
+            cfg["speaker_device"] = self._spk_indices[self._spk_names.index(sel)]
+        except Exception:
+            pass
+        cfg["server_ip"] = self._srv_ip.get().strip()
+        try:
+            cfg["server_port"] = int(self._srv_port.get().strip())
+        except ValueError:
+            pass
+
+        save_config(cfg)
+        self._status.set("✓  Guardado — reinicia para aplicar")
+        log.info("Configuración guardada desde el panel")
+        self.win.after(1200, self.win.destroy)
+
+
+class JarvisControlPanel:
+    """
+    Panel de control flotante (esquina inferior derecha).
+    - Arc reactor animado: cyan=idle, rojo=grabando, dorado=procesando
+    - Pausar / Parar
+    - Slider de volumen
+    - Botón Configuración → SettingsPanel
+    - Minimizar a bandeja del sistema
+    - Arrastrable (sin bordes del SO)
+    """
+
+    BG   = "#0a0a1a"
+    CARD = "#14142b"
+    CYAN = "#00d4ff"
+    RED  = "#ff3355"
+    GOLD = "#ffd700"
+    W    = 290
+    H    = 370
+
+    def __init__(self, cfg: dict):
+        import tkinter as tk
+        import tkinter.ttk as ttk
+
+        self.tk   = tk
+        self.ttk  = ttk
+        self.cfg  = cfg
+        self._tick      = 0
+        self._tray_icon = None
+        self._drag_x = self._drag_y = 0
+
+        root = tk.Tk()
+        self.root = root
+        root.title("J.A.R.V.I.S.")
+        root.resizable(False, False)
+        root.configure(bg=self.BG)
+        root.overrideredirect(True)   # sin chrome del SO
+
+        # esquina inferior derecha
+        root.update_idletasks()
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        x  = sw - self.W - 18
+        y  = sh - self.H - 56
+        root.geometry(f"{self.W}x{self.H}+{x}+{y}")
+
+        # siempre encima
+        root.attributes("-topmost", True)
+
+        self._build_ui()
+        self._animate()
+        self._poll_queue()
+
+        # arrastre con ratón
+        for w in (root,):
+            w.bind("<ButtonPress-1>",   self._drag_start)
+            w.bind("<B1-Motion>",       self._drag_move)
+
+    # ── construcción de widgets ───────────────────────────────────────────────
+
+    def _build_ui(self):
+        tk  = self.tk
+        root = self.root
+        BG   = self.BG
+        CYAN = self.CYAN
+
+        # barra de título
+        bar = tk.Frame(root, bg="#0d0d28", height=26)
+        bar.pack(fill="x")
+        bar.bind("<ButtonPress-1>", self._drag_start)
+        bar.bind("<B1-Motion>",     self._drag_move)
+        bar.pack_propagate(False)
+
+        tk.Label(bar, text="  ◈  J.A.R.V.I.S.", bg="#0d0d28",
+                 fg=CYAN, font=("Consolas", 10, "bold"),
+                 cursor="fleur").pack(side="left", pady=3)
+        tk.Label(bar, text="", bg="#0d0d28").pack(side="left", expand=True)
+        tk.Button(bar, text="  ─  ", bg="#0d0d28", fg="#888888",
+                  font=("Consolas", 9), bd=0,
+                  activebackground="#1a1a3a", activeforeground=CYAN,
+                  cursor="hand2",
+                  command=self._minimize_to_tray).pack(side="right", pady=1, padx=2)
+
+        # ── arc reactor ──────────────────────────────────────────────────────
+        self.cv = tk.Canvas(root, width=130, height=130,
+                            bg=BG, highlightthickness=0)
+        self.cv.pack(pady=(10, 2))
+
+        cx = cy = 65
+        # anillos (exterior → interior)
+        self._r3 = self.cv.create_oval(cx-58, cy-58, cx+58, cy+58,
+                                       outline=CYAN, width=1, fill="")
+        self._r2 = self.cv.create_oval(cx-42, cy-42, cx+42, cy+42,
+                                       outline=CYAN, width=2, fill="")
+        self._r1 = self.cv.create_oval(cx-26, cy-26, cx+26, cy+26,
+                                       outline=CYAN, width=2, fill=BG)
+        self._core = self.cv.create_oval(cx-14, cy-14, cx+14, cy+14,
+                                         outline="", fill=CYAN)
+        # líneas radiales estilo reactor
+        for deg in range(0, 360, 60):
+            rad = math.radians(deg)
+            x1 = cx + 18 * math.cos(rad); y1 = cy + 18 * math.sin(rad)
+            x2 = cx + 38 * math.cos(rad); y2 = cy + 38 * math.sin(rad)
+            self.cv.create_line(x1, y1, x2, y2, fill=CYAN, width=1, tags="spoke")
+
+        # ── estado texto ──────────────────────────────────────────────────────
+        self._state_var = tk.StringVar(value="IDLE")
+        tk.Label(root, textvariable=self._state_var,
+                 bg=BG, fg=CYAN, font=("Consolas", 9)).pack(pady=(2, 4))
+
+        # ── volumen ───────────────────────────────────────────────────────────
+        vf = tk.Frame(root, bg=BG)
+        vf.pack(fill="x", padx=18, pady=(0, 4))
+        tk.Label(vf, text="VOL", bg=BG, fg="#555577",
+                 font=("Consolas", 8)).pack(side="left")
+        self._vol = tk.DoubleVar(value=1.0)
+        tk.Scale(vf, from_=0.0, to=1.0, resolution=0.05,
+                 orient="horizontal", variable=self._vol,
+                 bg=BG, fg=CYAN, troughcolor="#14142b",
+                 highlightthickness=0, sliderrelief="flat",
+                 showvalue=False, length=210,
+                 command=self._on_volume).pack(side="right")
+
+        # ── botones principales ───────────────────────────────────────────────
+        bf = tk.Frame(root, bg=BG)
+        bf.pack(fill="x", padx=14, pady=(2, 2))
+
+        self._pause_btn = tk.Button(
+            bf, text="⏸  PAUSAR",
+            bg=self.CARD, fg=CYAN, font=("Consolas", 9, "bold"),
+            bd=0, padx=8, pady=7,
+            activebackground="#1e1e3a", activeforeground=CYAN,
+            cursor="hand2", command=self._on_pause)
+        self._pause_btn.pack(side="left", expand=True, fill="x", padx=(0, 3))
+
+        tk.Button(
+            bf, text="⏹  PARAR",
+            bg=self.CARD, fg=self.RED, font=("Consolas", 9, "bold"),
+            bd=0, padx=8, pady=7,
+            activebackground="#2a0a14", activeforeground=self.RED,
+            cursor="hand2", command=self._on_stop
+        ).pack(side="right", expand=True, fill="x")
+
+        # ── botón configuración ───────────────────────────────────────────────
+        tk.Button(
+            root, text="⚙  CONFIGURACIÓN",
+            bg="#0d0d28", fg="#7777aa", font=("Consolas", 9),
+            bd=0, pady=7,
+            activebackground=self.CARD, activeforeground=CYAN,
+            cursor="hand2", command=self._on_settings
+        ).pack(fill="x", padx=14, pady=(2, 10))
+
+    # ── animación del reactor ─────────────────────────────────────────────────
+
+    def _animate(self):
+        self._tick += 1
+        t = self._tick
+
+        pulse = 0.4 + 0.6 * abs(math.sin(t * 0.06))
+
+        with state_lock:
+            s = state
+
+        if s == State.RECORDING:
+            color      = self.RED
+            lbl        = "🔴  GRABANDO..."
+        elif s == State.PROCESSING:
+            color      = self.GOLD
+            lbl        = "⚡  PROCESANDO..."
+        else:
+            # IDLE: pulso suave en el anillo exterior
+            v = int(pulse * 0xff)
+            color = f"#00{v:02x}ff"
+            lbl   = "⏸  PAUSADO" if paused else "🔵  ESCUCHANDO"
+
+        self.cv.itemconfig(self._core, fill=color)
+        self.cv.itemconfig(self._r1,  outline=color)
+        self.cv.itemconfig(self._r2,  outline=color)
+        self.cv.itemconfig(self._r3,  outline=color)
+        self.cv.itemconfig("spoke",   fill=color)
+        self._state_var.set(lbl)
+
+        if paused:
+            self._pause_btn.config(text="▶  REANUDAR", fg=self.GOLD)
+        else:
+            self._pause_btn.config(text="⏸  PAUSAR",   fg=self.CYAN)
+
+        self.root.after(50, self._animate)
+
+    # ── sondeo de cola para auth ──────────────────────────────────────────────
+
+    def _poll_queue(self):
+        try:
+            req = _gui_request_queue.get_nowait()
+            if req == "show_auth":
+                show_auth_gui(self.cfg)
+        except queue.Empty:
+            pass
+        self.root.after(200, self._poll_queue)
+
+    # ── callbacks ─────────────────────────────────────────────────────────────
+
+    def _on_volume(self, val):
+        global JARVIS_VOLUME
+        JARVIS_VOLUME = float(val)
+
+    def _on_pause(self):
         global paused
         paused = not paused
-        label = "▶ Reanudar" if paused else "⏸ Pausar"
-        log.info("Pausado" if paused else "Reanudado")
+        log.info("Jarvis pausado" if paused else "Jarvis reanudado")
 
-    def on_set_ip(icon, item):
-        ip = input("IP del servidor DGX: ").strip()
-        if ip:
-            cfg["server_ip"] = ip
-            save_config(cfg)
-            log.info(f"IP guardada: {ip} — reinicia para aplicar")
-
-    def on_quit(icon, item):
+    def _on_stop(self):
         log.info("Cerrando Omni-Jarvis...")
-        icon.stop()
+        if self._tray_icon:
+            try: self._tray_icon.stop()
+            except Exception: pass
         os._exit(0)
 
-    icon = pystray.Icon(
-        "omni-jarvis",
-        build_icon(),
-        "Omni-Jarvis",
-        menu=pystray.Menu(
-            pystray.MenuItem("⏸ Pausar / Reanudar", on_pause),
-            pystray.MenuItem("🌐 Cambiar IP servidor", on_set_ip),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("❌ Salir", on_quit),
-        ),
-    )
-    return icon
+    def _on_settings(self):
+        SettingsPanel(self.root, self.cfg)
+
+    # ── minimizar a bandeja ───────────────────────────────────────────────────
+
+    def _minimize_to_tray(self):
+        self.root.withdraw()
+        self._start_tray()
+
+    def _start_tray(self):
+        try:
+            import pystray
+            from PIL import Image, ImageDraw
+        except ImportError:
+            self.root.deiconify()
+            return
+
+        def _mk_icon():
+            img  = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            draw.ellipse([4,  4,  60, 60], fill=(10, 10, 40, 255))
+            draw.ellipse([14, 14, 50, 50], outline=(0, 212, 255, 230), width=2)
+            draw.ellipse([26, 26, 38, 38], fill=(0, 212, 255, 255))
+            return img
+
+        def _on_show(icon, item):
+            icon.stop()
+            self._tray_icon = None
+            self.root.deiconify()
+            self.root.lift()
+
+        def _on_quit(icon, item):
+            icon.stop()
+            os._exit(0)
+
+        icon = pystray.Icon(
+            "omni-jarvis", _mk_icon(), "J.A.R.V.I.S.",
+            menu=pystray.Menu(
+                pystray.MenuItem("Mostrar panel", _on_show, default=True),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Salir", _on_quit),
+            )
+        )
+        self._tray_icon = icon
+        threading.Thread(target=icon.run, daemon=True, name="tray").start()
+
+    # ── arrastre ──────────────────────────────────────────────────────────────
+
+    def _drag_start(self, event):
+        self._drag_x = event.x
+        self._drag_y = event.y
+
+    def _drag_move(self, event):
+        x = self.root.winfo_x() + (event.x - self._drag_x)
+        y = self.root.winfo_y() + (event.y - self._drag_y)
+        self.root.geometry(f"+{x}+{y}")
+
+    def run(self):
+        self.root.mainloop()
+
 
 # ── main ──────────────────────────────────────────────────────────────────────
 def main():
@@ -899,30 +1308,27 @@ def main():
     print("   Omni-Jarvis v2 — J.A.R.V.I.S.  ")
     print("═══════════════════════════════════")
 
-    # ── primer arranque: guardar config base ─────────────────────────────────
     if not CONFIG_FILE.exists():
         save_config(cfg)
 
-    # ── detección de dispositivos: GUI (solo si nunca se ha hecho) ──────────
+    # primer arranque: seleccionar dispositivos
     if not cfg.get("devices_detected", False):
         cfg = detect_devices(cfg)
 
     log.info(f"Servidor : {cfg['server_ip']}:{cfg['server_port']}")
     log.info(f"Modelo   : {cfg.get('wakeword_model', 'hey_jarvis')} (umbral {cfg.get('wakeword_threshold', 0.5)})")
 
-    # ── arrancar hilos de audio, WS y acciones ────────────────────────────────
-    threads = [
-        threading.Thread(target=audio_loop,  args=(cfg,), daemon=True, name="audio"),
-        threading.Thread(target=ws_loop,     args=(cfg,), daemon=True, name="websocket"),
-        threading.Thread(target=action_loop, daemon=True,               name="actions"),
-    ]
-    for t in threads:
-        t.start()
+    # arrancar hilos de audio, WS y acciones
+    for name, target, args in [
+        ("audio",     audio_loop,  (cfg,)),
+        ("websocket", ws_loop,     (cfg,)),
+        ("actions",   action_loop, ()),
+    ]:
+        threading.Thread(target=target, args=args, daemon=True, name=name).start()
 
-    # ── gestionar GUI de auth si el WS la solicita (hilo principal) ──────────
-    # Antes de lanzar pystray, atender posibles peticiones de GUI de login
+    # esperar a que el hilo WS solicite (o no) la GUI de auth
     auth_shown = False
-    deadline = time.monotonic() + 15   # esperar max 15s a que WS inicie
+    deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         try:
             req = _gui_request_queue.get(timeout=0.3)
@@ -932,39 +1338,14 @@ def main():
             elif req == "auth_done":
                 break
         except queue.Empty:
-            # si ya hay token en config, no hay GUI que esperar
             if cfg.get("session_token"):
                 break
 
-    # ── pystray en hilo principal ─────────────────────────────────────────────
-    icon = create_tray(cfg)
-    if icon:
-        log.info("Sistema activo — di 'Jarvis' para activar")
-        # mientras pystray corre, seguir atendiendo peticiones de GUI de re-login
-        def tray_runner():
-            icon.run()
-        tray_t = threading.Thread(target=tray_runner, daemon=True)
-        tray_t.start()
-        # bucle principal: atiende re-autenticaciones si el token expira
-        while tray_t.is_alive():
-            try:
-                req = _gui_request_queue.get(timeout=1)
-                if req == "show_auth":
-                    show_auth_gui(cfg)
-            except queue.Empty:
-                pass
-    else:
-        log.info("Sin bandeja — Ctrl-C para salir")
-        try:
-            while True:
-                try:
-                    req = _gui_request_queue.get(timeout=1)
-                    if req == "show_auth":
-                        show_auth_gui(cfg)
-                except queue.Empty:
-                    pass
-        except KeyboardInterrupt:
-            log.info("Detenido.")
+    # panel de control — corre en el hilo principal (tkinter)
+    panel = JarvisControlPanel(cfg)
+    log.info("Panel de control activo — di 'Jarvis' para activar")
+    panel.run()
+
 
 if __name__ == "__main__":
     main()
