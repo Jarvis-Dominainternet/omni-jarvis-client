@@ -450,7 +450,8 @@ def take_screenshot() -> str:
         import mss
         from PIL import Image
         with mss.mss() as sct:
-            monitor = sct.monitors[1]
+            # monitors[0] = escritorio virtual completo; monitors[1..n] = monitores reales
+            monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
             img = sct.grab(monitor)
             pil = Image.frombytes("RGB", img.size, img.bgra, "raw", "BGRX")
         buf = io.BytesIO()
@@ -556,6 +557,11 @@ def audio_loop(cfg: dict):
                         screenshot_b64 = take_screenshot() if cfg.get("screenshot_on_send", True) else ""
                         webcam_b64     = take_webcam_frame(cfg) if cfg.get("webcam_on_send", False) else ""
                         audio_wav      = frames_to_wav(recording_frames)
+                        if not audio_wav:
+                            log.warning("frames_to_wav vacío — ignorando grabación")
+                            with state_lock:
+                                state = State.IDLE
+                            continue
 
                         send_queue.put({
                             "audio":      base64.b64encode(audio_wav).decode(),
@@ -573,6 +579,8 @@ def audio_loop(cfg: dict):
 
 def frames_to_wav(frames: list[np.ndarray]) -> bytes:
     """Convierte lista de numpy int16 en bytes WAV."""
+    if not frames:
+        return b""
     audio = np.concatenate(frames)
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
@@ -625,6 +633,13 @@ async def _ws_async(cfg: dict):
                 )
         except Exception as e:
             log.warning(f"WebSocket desconectado: {e}. Reintentando en 5s...")
+            # vaciar send_queue para no enviar grabaciones antiguas tras reconectar
+            while not send_queue.empty():
+                try: send_queue.get_nowait()
+                except queue.Empty: break
+            with state_lock:
+                global state
+                state = State.IDLE
             await asyncio.sleep(5)
 
 
@@ -773,18 +788,26 @@ def action_loop():
 
         if mtype == "audio":
             # reproducir audio de Jarvis
+            tmp = None
             try:
-                data = base64.b64decode(msg["data"])
+                raw_b64 = msg.get("data") or msg.get("content", "")
+                if not raw_b64:
+                    log.warning("Mensaje audio sin datos")
+                    continue
+                data = base64.b64decode(raw_b64)
                 with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
                     f.write(data)
                     tmp = f.name
                 arr, sr = sf.read(tmp)
-                os.unlink(tmp)
                 log.info("Reproduciendo respuesta de Jarvis...")
                 sd.play(arr * float(JARVIS_VOLUME), sr)
                 sd.wait()
             except Exception as e:
                 log.error(f"Error reproduciendo audio: {e}")
+            finally:
+                if tmp:
+                    try: os.unlink(tmp)
+                    except Exception: pass
 
         elif mtype == "text":
             print(f"\n[JARVIS] {msg.get('content', '')}\n")
@@ -815,7 +838,13 @@ def _execute_action(act: dict, pyautogui):
         pyautogui.moveTo(x, y, duration=0.3)
     elif t == "type" and tx:
         log.info(f"  → type: {tx[:40]}")
-        pyautogui.write(tx, interval=0.04)
+        # pyautogui.write no soporta acentos/emojis en Windows → usar clipboard
+        try:
+            import pyperclip
+            pyperclip.copy(tx)
+            pyautogui.hotkey("ctrl", "v")
+        except ImportError:
+            pyautogui.write(tx, interval=0.04)
     elif t == "key" and tx:
         log.info(f"  → key: {tx}")
         pyautogui.hotkey(*tx.split("+"))
@@ -831,14 +860,29 @@ def _execute_action(act: dict, pyautogui):
     elif t == "show_html":
         html = act.get("html", "")
         if html:
-            # guardar en fichero temporal y abrir en navegador
-            tmp = tempfile.NamedTemporaryFile(
-                suffix=".html", prefix="jarvis-", delete=False, mode="w", encoding="utf-8"
-            )
-            tmp.write(html)
-            tmp.close()
-            log.info(f"  → show_html: {tmp.name} ({len(html)} bytes)")
-            webbrowser.open(f"file://{tmp.name}")
+            # asegurar charset UTF-8 en el HTML para que Windows lo muestre bien
+            if "<meta charset" not in html.lower():
+                html = html.replace("<head>", '<head><meta charset="UTF-8">', 1)
+                if "<head>" not in html:
+                    html = '<meta charset="UTF-8">' + html
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".html", prefix="jarvis-", delete=False,
+                    mode="w", encoding="utf-8"
+                ) as f:
+                    f.write(html)
+                    tmp_path = f.name
+                log.info(f"  → show_html: {tmp_path} ({len(html)} bytes)")
+                webbrowser.open(f"file://{tmp_path}")
+                # limpiar tras 30s (navegador ya habrá cargado el archivo)
+                def _cleanup(p):
+                    time.sleep(30)
+                    try: os.unlink(p)
+                    except Exception: pass
+                threading.Thread(target=_cleanup, args=(tmp_path,), daemon=True).start()
+            except Exception as e:
+                log.error(f"show_html error: {e}")
 
     elif t == "notify":
         # notificación del sistema (Linux: notify-send, macOS: osascript)
@@ -846,11 +890,18 @@ def _execute_action(act: dict, pyautogui):
         body  = act.get("body", tx)
         log.info(f"  → notify: {title} — {body[:60]}")
         try:
-            if sys.platform == "darwin":
+            if sys.platform == "win32":
+                # Windows 10/11: usar win10toast si está instalado, si no ignorar
+                try:
+                    from win10toast import ToastNotifier
+                    ToastNotifier().show_toast(title, body, duration=5, threaded=True)
+                except ImportError:
+                    # fallback: mensaje en consola
+                    log.info(f"[NOTIFY] {title}: {body}")
+            elif sys.platform == "darwin":
                 subprocess.Popen(
                     ["osascript", "-e",
-                     f'display notification "{body}" with title "{title}"']
-                )
+                     f'display notification "{body}" with title "{title}"'])
             else:
                 subprocess.Popen(["notify-send", title, body])
         except Exception as e:
@@ -1412,58 +1463,57 @@ class JarvisControlPanel:
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _animate(self):
-        self._tick += 1
-        t = self._tick
-        pulse = 0.35 + 0.65 * abs(math.sin(t * 0.07))
+        try:
+            self._tick += 1
+            t = self._tick
+            pulse = 0.35 + 0.65 * abs(math.sin(t * 0.07))
 
-        with state_lock:
-            s = state
+            with state_lock:
+                s = state
 
-        if s == State.RECORDING:
-            color = self.RED
-            lbl   = "🔴  GRABANDO..."
-        elif s == State.PROCESSING:
-            # parpadeo dorado
-            color = self.GOLD if (t // 6) % 2 == 0 else "#aa8800"
-            lbl   = "⚡  PROCESANDO..."
-        else:
-            v = int((0x88 + int(0x77 * pulse)) & 0xff)
-            color = f"#00{v:02x}ff"
-            lbl   = "⏸  PAUSADO" if paused else "🔵  ESCUCHANDO"
+            if s == State.RECORDING:
+                color = self.RED
+                lbl   = "🔴  GRABANDO..."
+            elif s == State.PROCESSING:
+                color = self.GOLD if (t // 6) % 2 == 0 else "#aa8800"
+                lbl   = "⚡  PROCESANDO..."
+            else:
+                v = int((0x88 + int(0x77 * pulse)) & 0xff)
+                color = f"#00{v:02x}ff"
+                lbl   = "⏸  PAUSADO" if paused else "🔵  ESCUCHANDO"
 
-        if hasattr(self, "cv") and self.cv.winfo_exists():
-            for tag in ("core", "r1", "r2", "r3", "spoke"):
+            if hasattr(self, "cv") and self.cv.winfo_exists():
                 try:
-                    if tag == "core":
-                        self.cv.itemconfig(tag, fill=color)
-                    else:
-                        self.cv.itemconfig(tag, outline=color if tag != "spoke" else "",
-                                           fill=color if tag == "spoke" else "")
+                    self.cv.itemconfig("core",  fill=color, outline="")
+                    self.cv.itemconfig("r1",    outline=color, fill=self.BG)
+                    self.cv.itemconfig("r2",    outline=color, fill="")
+                    self.cv.itemconfig("r3",    outline=color, fill="")
+                    self.cv.itemconfig("spoke", fill=color)
                 except Exception:
                     pass
-            # fix: core fill, rings outline, spokes fill
-            try:
-                self.cv.itemconfig("core",  fill=color, outline="")
-                self.cv.itemconfig("r1",    outline=color, fill=self.BG)
-                self.cv.itemconfig("r2",    outline=color, fill="")
-                self.cv.itemconfig("r3",    outline=color, fill="")
-                self.cv.itemconfig("spoke", fill=color)
-            except Exception:
-                pass
 
-        if hasattr(self, "_state_var"):
-            self._state_var.set(lbl)
-        if hasattr(self, "_popup_state") and self._popup and self._popup.winfo_exists():
-            self._popup_state.set(lbl)
+            if hasattr(self, "_state_var"):
+                try: self._state_var.set(lbl)
+                except Exception: pass
+            if hasattr(self, "_popup_state") and self._popup:
+                try:
+                    if self._popup.winfo_exists():
+                        self._popup_state.set(lbl)
+                except Exception: pass
 
-        # actualizar botón pausa si existe
-        if hasattr(self, "_pause_btn") and self._pause_btn.winfo_exists():
-            if paused:
-                self._pause_btn.config(text="▶  REANUDAR", fg=self.GOLD)
-            else:
-                self._pause_btn.config(text="⏸  PAUSAR",   fg=self.CYAN)
+            if hasattr(self, "_pause_btn"):
+                try:
+                    if self._pause_btn.winfo_exists():
+                        if paused:
+                            self._pause_btn.config(text="▶  REANUDAR", fg=self.GOLD)
+                        else:
+                            self._pause_btn.config(text="⏸  PAUSAR",   fg=self.CYAN)
+                except Exception: pass
 
-        self.root.after(50, self._animate)
+        except Exception as e:
+            log.debug(f"_animate error: {e}")
+        finally:
+            self.root.after(50, self._animate)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # COLA AUTH

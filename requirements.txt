@@ -19,6 +19,10 @@ opencv-python>=4.8.0
 
 # Control de ratón y teclado
 pyautogui>=0.9.54
+pyperclip>=1.8.2             # copiar texto al portapapeles (soporta acentos/emojis en Windows)
+
+# Notificaciones en Windows (opcional, se instala si se quiere)
+# win10toast>=0.9
 
 # WebSocket
 websockets>=12.0
