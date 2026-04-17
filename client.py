@@ -87,21 +87,38 @@ def _gui_style(root):
     root.configure(bg=BG)
     style = ttk.Style(root)
     style.theme_use("clam")
-    style.configure(".",             background=BG, foreground="#cccccc", font=("Consolas", 10))
-    style.configure("TFrame",        background=BG)
-    style.configure("Card.TFrame",   background=CARD)
-    style.configure("TLabel",        background=BG, foreground="#cccccc", font=("Consolas", 10))
-    style.configure("Title.TLabel",  background=BG, foreground=CYAN,     font=("Consolas", 13, "bold"))
-    style.configure("Sub.TLabel",    background=BG, foreground="#888888", font=("Consolas", 9))
-    style.configure("Card.TLabel",   background=CARD, foreground="#cccccc", font=("Consolas", 10))
-    style.configure("TCombobox",     fieldbackground=CARD, background=CARD,
-                    foreground="#cccccc", selectbackground="#1e1e3a", font=("Consolas", 10))
-    style.configure("TCheckbutton",  background=BG, foreground="#cccccc", font=("Consolas", 10))
-    style.configure("Cyan.TButton",  background=CYAN, foreground="#000000",
-                    font=("Consolas", 11, "bold"), padding=8)
-    style.map("Cyan.TButton", background=[("active", "#00aacc")])
-    style.configure("TEntry",        fieldbackground=CARD, foreground="#cccccc",
-                    insertcolor=CYAN, font=("Consolas", 11))
+    style.configure(".",              background=BG,   foreground="#cccccc", font=("Consolas", 10),
+                                      borderwidth=0,   relief="flat")
+    style.configure("TFrame",         background=BG)
+    style.configure("Card.TFrame",    background=CARD)
+    style.configure("TLabel",         background=BG,   foreground="#cccccc", font=("Consolas", 10))
+    style.configure("Title.TLabel",   background=BG,   foreground=CYAN,     font=("Consolas", 13, "bold"))
+    style.configure("Sub.TLabel",     background=BG,   foreground="#666688", font=("Consolas", 9))
+    style.configure("Card.TLabel",    background=CARD, foreground="#cccccc", font=("Consolas", 10))
+    style.configure("TCombobox",      fieldbackground=CARD, background=CARD,
+                    foreground="#cccccc", selectbackground="#1e1e3a", font=("Consolas", 10),
+                    arrowcolor=CYAN, bordercolor="#1e1e3a")
+    style.map("TCombobox",            fieldbackground=[("readonly", CARD)],
+              foreground=[("readonly", "#cccccc")])
+    style.configure("TCheckbutton",   background=BG,   foreground="#aaaacc", font=("Consolas", 10),
+                    indicatorbackground=CARD, indicatorforeground=CYAN)
+    style.map("TCheckbutton",         background=[("active", BG)],
+              foreground=[("active", CYAN)], indicatorforeground=[("selected", CYAN)])
+    style.configure("Cyan.TButton",   background=CYAN, foreground="#000000",
+                    font=("Consolas", 11, "bold"), padding=8, borderwidth=0)
+    style.map("Cyan.TButton",         background=[("active", "#00aacc"), ("pressed", "#0088aa")])
+    style.configure("TEntry",         fieldbackground=CARD, foreground="#cccccc",
+                    insertcolor=CYAN, font=("Consolas", 11), bordercolor="#1e1e3a")
+    style.configure("TScale",         background=BG,   troughcolor=CARD,
+                    sliderlength=14,  sliderrelief="flat")
+    style.map("TScale",               background=[("active", BG)])
+    # notebook con pestañas oscuras (crítico para Windows)
+    style.configure("TNotebook",      background=BG,   borderwidth=0, tabmargins=[2, 2, 0, 0])
+    style.configure("TNotebook.Tab",  background="#12122a", foreground="#7777aa",
+                    padding=[14, 7],  font=("Consolas", 9),  borderwidth=0)
+    style.map("TNotebook.Tab",
+              background=[("selected", "#1c1c3e"), ("active", "#16163a")],
+              foreground=[("selected", CYAN),      ("active", "#aaaaff")])
 
 
 def detect_devices(cfg: dict) -> dict:
@@ -839,12 +856,46 @@ def _execute_action(act: dict, pyautogui):
         except Exception as e:
             log.debug(f"notify error: {e}")
 
+# ── helpers de UI ────────────────────────────────────────────────────────────
+
+def _btn(parent, text, fg, cmd, bg="#12122a", font=("Consolas", 9, "bold"),
+         padx=8, pady=6, hover_bg="#1c1c3e"):
+    """Botón plano con hover."""
+    import tkinter as tk
+    b = tk.Button(parent, text=text, fg=fg, bg=bg, font=font,
+                  bd=0, padx=padx, pady=pady, cursor="hand2",
+                  activebackground=hover_bg, activeforeground=fg,
+                  relief="flat", command=cmd)
+    b.bind("<Enter>", lambda _: b.config(bg=hover_bg))
+    b.bind("<Leave>", lambda _: b.config(bg=bg))
+    return b
+
+
+def _scrollable(parent, bg, height=120):
+    """Frame con scrollbar vertical."""
+    import tkinter as tk
+    outer = tk.Frame(parent, bg=bg, bd=1, relief="flat",
+                     highlightthickness=1, highlightbackground="#1e1e3a")
+    cv    = tk.Canvas(outer, bg=bg, highlightthickness=0, height=height)
+    sb    = tk.Scrollbar(outer, orient="vertical", command=cv.yview,
+                         bg=bg, troughcolor="#0d0d1a", width=10)
+    inner = tk.Frame(cv, bg=bg)
+    cv.create_window((0, 0), window=inner, anchor="nw")
+    cv.configure(yscrollcommand=sb.set)
+    inner.bind("<Configure>",
+               lambda e: cv.configure(scrollregion=cv.bbox("all")))
+    cv.pack(side="left", fill="both", expand=True)
+    sb.pack(side="right", fill="y")
+    return outer, inner
+
+
 # ── Panel de control flotante ─────────────────────────────────────────────────
 
 class SettingsPanel:
-    """Ventana modal de configuración avanzada (Audio, Cámara, Servidor)."""
+    """Ventana modal de configuración — Audio, Cámara, Servidor."""
 
-    BG   = "#0a0a1a"
+    BG   = "#0d0d1a"
+    CARD = "#14142b"
     CYAN = "#00d4ff"
 
     def __init__(self, parent, cfg: dict):
@@ -852,62 +903,93 @@ class SettingsPanel:
         import tkinter.ttk as ttk
 
         self.cfg = cfg
-        self.win = tk.Toplevel(parent)
-        self.win.title("Configuración — J.A.R.V.I.S.")
-        self.win.resizable(False, False)
-        self.win.configure(bg=self.BG)
-        self.win.grab_set()
+        win = tk.Toplevel(parent)
+        self.win = win
+        win.title("J.A.R.V.I.S. — Configuración")
+        win.resizable(False, False)
+        win.configure(bg=self.BG)
+        win.grab_set()
+        _gui_style(win)
 
-        _gui_style(self.win)
-
-        W, H = 460, 560
+        W, H = 480, 580
+        # posicionar a la izquierda del panel principal
         px = parent.winfo_rootx()
         py = parent.winfo_rooty()
-        self.win.geometry(f"{W}x{H}+{max(0, px-W-10)}+{py}")
+        wx = max(0, px - W - 8)
+        wy = max(0, py)
+        win.geometry(f"{W}x{H}+{wx}+{wy}")
 
         self._build(tk, ttk)
 
     def _build(self, tk, ttk):
-        win = self.win
-        cfg = self.cfg
-        pad = {"padx": 20, "pady": 4}
+        win  = self.win
+        cfg  = self.cfg
+        BG   = self.BG
+        CARD = self.CARD
+        CYAN = self.CYAN
+        pad  = {"padx": 22, "pady": 5}
 
-        ttk.Label(win, text="⚙  Configuración", style="Title.TLabel").pack(pady=(14, 2))
-        ttk.Label(win, text="Los cambios se aplican al reiniciar", style="Sub.TLabel").pack(pady=(0, 8))
+        # cabecera
+        hdr = tk.Frame(win, bg="#0d0d28", height=42)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="  ⚙  CONFIGURACIÓN", bg="#0d0d28",
+                 fg=CYAN, font=("Consolas", 11, "bold")).pack(side="left", pady=8)
+        tk.Label(hdr, text="Los cambios se aplican al reiniciar",
+                 bg="#0d0d28", fg="#555577",
+                 font=("Consolas", 8)).pack(side="right", padx=14)
 
         nb = ttk.Notebook(win)
-        nb.pack(fill="both", expand=True, padx=10, pady=2)
+        nb.pack(fill="both", expand=True, padx=0, pady=0)
 
-        # ───── Pestaña Audio ─────────────────────────────────────────────────
-        t_audio = ttk.Frame(nb)
-        nb.add(t_audio, text="🎙️  Audio")
+        # ─── helper: marco de pestaña con fondo correcto ─────────────────────
+        def tab_frame():
+            f = tk.Frame(nb, bg=BG)
+            return f
 
-        ttk.Label(t_audio, text="Modelo wake word").pack(anchor="w", **pad)
+        # ─── label de sección ────────────────────────────────────────────────
+        def section(parent, text):
+            tk.Label(parent, text=text, bg=BG, fg=CYAN,
+                     font=("Consolas", 9, "bold")).pack(anchor="w", **pad)
+
+        # ═══ AUDIO ═══════════════════════════════════════════════════════════
+        t_audio = tab_frame()
+        nb.add(t_audio, text="  🎙  Audio  ")
+
+        section(t_audio, "Wake Word")
+        tk.Label(t_audio, text="Modelo", bg=BG, fg="#8888aa",
+                 font=("Consolas", 9)).pack(anchor="w", padx=22)
         self._ww_model = tk.StringVar(value=cfg.get("wakeword_model", "hey_jarvis"))
-        ttk.Entry(t_audio, textvariable=self._ww_model, width=36).pack(padx=20, anchor="w")
-        ttk.Label(t_audio, text="(ej: hey_jarvis, alexa, hey_mycroft)",
-                  style="Sub.TLabel").pack(anchor="w", padx=20)
+        e = tk.Entry(t_audio, textvariable=self._ww_model,
+                     bg=CARD, fg="#cccccc", insertbackground=CYAN,
+                     font=("Consolas", 11), bd=0, relief="flat", width=30)
+        e.pack(anchor="w", padx=22, ipady=4)
+        tk.Label(t_audio, text="hey_jarvis · alexa · hey_mycroft",
+                 bg=BG, fg="#444466", font=("Consolas", 8)).pack(anchor="w", padx=22)
 
-        self._ww_thresh_lbl_var = tk.StringVar(
-            value=f"Umbral wake word  ({cfg.get('wakeword_threshold', 0.5):.2f})")
-        ttk.Label(t_audio, textvariable=self._ww_thresh_lbl_var).pack(anchor="w", **pad)
+        self._ww_lv = tk.StringVar(
+            value=f"Umbral  {cfg.get('wakeword_threshold', 0.5):.2f}  "
+                  f"← más sensible   menos sensible →")
+        tk.Label(t_audio, textvariable=self._ww_lv, bg=BG, fg="#8888aa",
+                 font=("Consolas", 8)).pack(anchor="w", padx=22, pady=(8, 0))
         self._ww_thresh = tk.DoubleVar(value=float(cfg.get("wakeword_threshold", 0.5)))
+        def _thr(*_):
+            v = self._ww_thresh.get()
+            self._ww_lv.set(f"Umbral  {v:.2f}  ← más sensible   menos sensible →")
+        self._ww_thresh.trace_add("write", _thr)
+        tk.Scale(t_audio, from_=0.1, to=0.9, resolution=0.02,
+                 orient="horizontal", variable=self._ww_thresh,
+                 bg=BG, fg=CYAN, troughcolor=CARD,
+                 highlightthickness=0, sliderrelief="flat",
+                 showvalue=False, length=300,
+                 activebackground=CYAN).pack(anchor="w", padx=20)
 
-        def _thresh_trace(*_):
-            self._ww_thresh_lbl_var.set(
-                f"Umbral wake word  ({self._ww_thresh.get():.2f})")
-        self._ww_thresh.trace_add("write", _thresh_trace)
-
-        ttk.Scale(t_audio, from_=0.1, to=0.9, variable=self._ww_thresh,
-                  orient="horizontal", length=220).pack(padx=20, anchor="w")
-
-        ttk.Label(t_audio, text="Micrófonos activos").pack(anchor="w", **pad)
-        mic_card = ttk.Frame(t_audio, style="Card.TFrame")
-        mic_card.pack(fill="x", padx=20, pady=2)
-
+        section(t_audio, "Micrófonos")
+        scroll_out, mic_inner = _scrollable(t_audio, CARD, height=100)
+        scroll_out.pack(fill="x", padx=22, pady=(0, 6))
         self._mic_vars: dict[int, tk.BooleanVar] = {}
         sel_mics = set(cfg.get("mic_devices",
-                               [cfg["mic_device"]] if cfg.get("mic_device") is not None else []))
+                       [cfg["mic_device"]] if cfg.get("mic_device") is not None else []))
         try:
             import sounddevice as sd
             mics = [(i, d["name"]) for i, d in enumerate(sd.query_devices())
@@ -916,11 +998,13 @@ class SettingsPanel:
             mics = []
         for idx, name in mics:
             v = tk.BooleanVar(value=(idx in sel_mics))
-            ttk.Checkbutton(mic_card, text=f"{name[:40]}",
-                            variable=v).pack(anchor="w", padx=8, pady=1)
+            tk.Checkbutton(mic_inner, text=f"  {name[:42]}", variable=v,
+                           bg=CARD, fg="#aaaacc", selectcolor="#1e1e3a",
+                           activebackground=CARD, activeforeground=CYAN,
+                           font=("Consolas", 9), bd=0).pack(anchor="w", pady=1)
             self._mic_vars[idx] = v
 
-        ttk.Label(t_audio, text="Altavoz").pack(anchor="w", **pad)
+        section(t_audio, "Altavoz")
         try:
             spks = [(i, d["name"]) for i, d in enumerate(sd.query_devices())
                     if d["max_output_channels"] > 0]
@@ -932,21 +1016,20 @@ class SettingsPanel:
         cur_spk = cfg.get("speaker_device")
         pre = next((j + 1 for j, (i, _) in enumerate(spks) if i == cur_spk), 0)
         spk_cb = ttk.Combobox(t_audio, textvariable=self._spk_var,
-                              values=self._spk_names, state="readonly", width=40)
+                              values=self._spk_names, state="readonly", width=46)
         spk_cb.current(pre)
-        spk_cb.pack(padx=20, anchor="w", pady=(0, 4))
+        spk_cb.pack(padx=22, anchor="w", pady=(0, 8))
 
-        # ───── Pestaña Cámara ────────────────────────────────────────────────
-        t_cam = ttk.Frame(nb)
-        nb.add(t_cam, text="📷  Cámara")
+        # ═══ CÁMARA ══════════════════════════════════════════════════════════
+        t_cam = tab_frame()
+        nb.add(t_cam, text="  📷  Cámara  ")
 
-        ttk.Label(t_cam, text="Cámaras activas").pack(anchor="w", **pad)
-        cam_card = ttk.Frame(t_cam, style="Card.TFrame")
-        cam_card.pack(fill="x", padx=20, pady=2)
-
+        section(t_cam, "Cámaras activas")
+        scroll_out2, cam_inner = _scrollable(t_cam, CARD, height=100)
+        scroll_out2.pack(fill="x", padx=22, pady=(0, 6))
         self._cam_vars: dict[int, tk.BooleanVar] = {}
         sel_cams = set(cfg.get("webcam_devices",
-                               [cfg["webcam_device"]] if cfg.get("webcam_device") is not None else []))
+                       [cfg["webcam_device"]] if cfg.get("webcam_device") is not None else []))
         try:
             import cv2
             webcams = []
@@ -955,41 +1038,57 @@ class SettingsPanel:
                 if cap.isOpened():
                     w_ = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                     h_ = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    webcams.append((idx, f"Cámara {idx}  ({w_}x{h_})"))
+                    webcams.append((idx, f"Cámara {idx}  ({w_}×{h_})"))
                     cap.release()
         except ImportError:
             webcams = []
-        for idx, name in webcams:
-            v = tk.BooleanVar(value=(idx in sel_cams))
-            ttk.Checkbutton(cam_card, text=name, variable=v).pack(anchor="w", padx=8, pady=1)
-            self._cam_vars[idx] = v
-
-        if not webcams:
-            ttk.Label(cam_card, text="No se detectaron cámaras",
-                      style="Sub.TLabel").pack(padx=8, pady=4)
+        if webcams:
+            for idx, name in webcams:
+                v = tk.BooleanVar(value=(idx in sel_cams))
+                tk.Checkbutton(cam_inner, text=f"  {name}", variable=v,
+                               bg=CARD, fg="#aaaacc", selectcolor="#1e1e3a",
+                               activebackground=CARD, activeforeground=CYAN,
+                               font=("Consolas", 9), bd=0).pack(anchor="w", pady=1)
+                self._cam_vars[idx] = v
+        else:
+            tk.Label(cam_inner, text="  No se detectaron cámaras",
+                     bg=CARD, fg="#444466", font=("Consolas", 9)).pack(padx=8, pady=6)
 
         self._webcam_send = tk.BooleanVar(value=cfg.get("webcam_on_send", False))
-        ttk.Checkbutton(t_cam,
-                        text="Enviar imagen de webcam con cada comando",
-                        variable=self._webcam_send).pack(anchor="w", padx=20, pady=8)
+        tk.Checkbutton(t_cam,
+                       text="  Enviar imagen de webcam con cada comando",
+                       variable=self._webcam_send,
+                       bg=BG, fg="#aaaacc", selectcolor="#1e1e3a",
+                       activebackground=BG, activeforeground=CYAN,
+                       font=("Consolas", 9), bd=0).pack(anchor="w", padx=20, pady=10)
 
-        # ───── Pestaña Servidor ──────────────────────────────────────────────
-        t_srv = ttk.Frame(nb)
-        nb.add(t_srv, text="🌐  Servidor")
+        # ═══ SERVIDOR ════════════════════════════════════════════════════════
+        t_srv = tab_frame()
+        nb.add(t_srv, text="  🌐  Servidor  ")
 
-        ttk.Label(t_srv, text="IP del servidor DGX").pack(anchor="w", **pad)
-        self._srv_ip = tk.StringVar(value=cfg.get("server_ip", "192.168.1.129"))
-        ttk.Entry(t_srv, textvariable=self._srv_ip, width=26).pack(padx=20, anchor="w")
+        section(t_srv, "Conexión")
+        for lbl, attr, default, w in [
+            ("IP del DGX  (Tailscale o LAN)", "_srv_ip",   cfg.get("server_ip",   "192.168.1.129"), 28),
+            ("Puerto WebSocket",              "_srv_port", str(cfg.get("server_port", 8765)),         10),
+        ]:
+            tk.Label(t_srv, text=lbl, bg=BG, fg="#8888aa",
+                     font=("Consolas", 9)).pack(anchor="w", padx=22, pady=(6, 1))
+            var = tk.StringVar(value=default)
+            setattr(self, attr, var)
+            tk.Entry(t_srv, textvariable=var, bg=CARD, fg="#cccccc",
+                     insertbackground=CYAN, font=("Consolas", 11),
+                     bd=0, relief="flat", width=w).pack(anchor="w", padx=22, ipady=4)
 
-        ttk.Label(t_srv, text="Puerto WebSocket").pack(anchor="w", **pad)
-        self._srv_port = tk.StringVar(value=str(cfg.get("server_port", 8765)))
-        ttk.Entry(t_srv, textvariable=self._srv_port, width=12).pack(padx=20, anchor="w")
-
-        # ── guardar ──────────────────────────────────────────────────────────
+        # ─── pie con guardar ─────────────────────────────────────────────────
+        foot = tk.Frame(win, bg="#0d0d28", height=44)
+        foot.pack(fill="x", side="bottom")
+        foot.pack_propagate(False)
         self._status = tk.StringVar(value="")
-        ttk.Label(win, textvariable=self._status, style="Sub.TLabel").pack(pady=2)
-        ttk.Button(win, text="  Guardar  ", style="Cyan.TButton",
-                   command=self._save).pack(pady=(4, 14))
+        tk.Label(foot, textvariable=self._status, bg="#0d0d28",
+                 fg="#00bb88", font=("Consolas", 9)).pack(side="left", padx=18)
+        _btn(foot, "  GUARDAR  ", "#000000", self._save,
+             bg=CYAN, font=("Consolas", 10, "bold"),
+             hover_bg="#00aacc").pack(side="right", padx=14, pady=7)
 
     def _save(self):
         cfg = self.cfg
@@ -1017,200 +1116,358 @@ class SettingsPanel:
             pass
 
         save_config(cfg)
-        self._status.set("✓  Guardado — reinicia para aplicar")
-        log.info("Configuración guardada desde el panel")
-        self.win.after(1200, self.win.destroy)
+        self._status.set("✓  Guardado")
+        log.info("Configuración guardada")
+        self.win.after(1000, self.win.destroy)
 
 
 class JarvisControlPanel:
     """
-    Panel de control flotante (esquina inferior derecha).
-    - Arc reactor animado: cyan=idle, rojo=grabando, dorado=procesando
-    - Pausar / Parar
-    - Slider de volumen
-    - Botón Configuración → SettingsPanel
-    - Minimizar a bandeja del sistema
-    - Arrastrable (sin bordes del SO)
+    Panel flotante con dos modos:
+    - FULL  (290×380): reactor + estado + volumen + botones + config
+    - MINI  ( 68× 68): solo el reactor; hover muestra popup de controles
+    Minimizable a bandeja del sistema. Arrastrable.
     """
 
-    BG   = "#0a0a1a"
-    CARD = "#14142b"
-    CYAN = "#00d4ff"
-    RED  = "#ff3355"
-    GOLD = "#ffd700"
-    W    = 290
-    H    = 370
+    BG    = "#0a0a18"
+    CARD  = "#12122a"
+    BAR   = "#0d0d26"
+    CYAN  = "#00d4ff"
+    RED   = "#ff3355"
+    GOLD  = "#ffd700"
+    W_FULL = 290
+    H_FULL = 382
+    W_MINI = 68
+    H_MINI = 68
 
     def __init__(self, cfg: dict):
         import tkinter as tk
         import tkinter.ttk as ttk
 
-        self.tk   = tk
-        self.ttk  = ttk
-        self.cfg  = cfg
+        self.tk  = tk
+        self.cfg = cfg
         self._tick      = 0
         self._tray_icon = None
         self._drag_x = self._drag_y = 0
+        self._mini   = False
+        self._popup  = None
+        self._popup_inside = False
+        self._hide_id      = None
 
         root = tk.Tk()
         self.root = root
         root.title("J.A.R.V.I.S.")
         root.resizable(False, False)
         root.configure(bg=self.BG)
-        root.overrideredirect(True)   # sin chrome del SO
+        root.overrideredirect(True)
+        root.attributes("-topmost", True)
 
-        # esquina inferior derecha
+        # posición inicial: esquina inferior derecha
         root.update_idletasks()
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
-        x  = sw - self.W - 18
-        y  = sh - self.H - 56
-        root.geometry(f"{self.W}x{self.H}+{x}+{y}")
+        self._x_full = sw - self.W_FULL - 18
+        self._y_full = sh - self.H_FULL - 52
+        self._x_mini = sw - self.W_MINI - 18
+        self._y_mini = sh - self.H_MINI - 52
+        root.geometry(f"{self.W_FULL}x{self.H_FULL}+{self._x_full}+{self._y_full}")
 
-        # siempre encima
-        root.attributes("-topmost", True)
+        # borde decorativo (1px CYAN)
+        root.configure(highlightthickness=1,
+                       highlightbackground="#1a1a3a",
+                       highlightcolor="#00d4ff")
 
-        self._build_ui()
+        self._build_full()
         self._animate()
         self._poll_queue()
 
-        # arrastre con ratón
-        for w in (root,):
-            w.bind("<ButtonPress-1>",   self._drag_start)
-            w.bind("<B1-Motion>",       self._drag_move)
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CONSTRUCCIÓN MODO FULL
+    # ═══════════════════════════════════════════════════════════════════════════
 
-    # ── construcción de widgets ───────────────────────────────────────────────
+    def _build_full(self):
+        tk   = self.tk
+        root = self.root
+        BG   = self.BG
+        CARD = self.CARD
+        BAR  = self.BAR
+        CYAN = self.CYAN
 
-    def _build_ui(self):
-        tk  = self.tk
+        # ── barra superior ────────────────────────────────────────────────────
+        bar = tk.Frame(root, bg=BAR, height=28)
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
+        for w in (bar, root):
+            w.bind("<ButtonPress-1>", self._drag_start)
+            w.bind("<B1-Motion>",     self._drag_move)
+
+        tk.Label(bar, text="  ◈  J.A.R.V.I.S.", bg=BAR,
+                 fg=CYAN, font=("Consolas", 10, "bold"),
+                 cursor="fleur").pack(side="left")
+
+        # botones de la barra (mini y bandeja)
+        for txt, cmd in [("▫", self._toggle_mini), ("─", self._to_tray)]:
+            b = tk.Button(bar, text=txt, bg=BAR, fg="#666688",
+                          font=("Consolas", 10), bd=0, padx=6,
+                          activebackground="#1a1a3a", activeforeground=CYAN,
+                          cursor="hand2", relief="flat", command=cmd)
+            b.pack(side="right")
+            b.bind("<Enter>", lambda e, b=b: b.config(fg=CYAN))
+            b.bind("<Leave>", lambda e, b=b: b.config(fg="#666688"))
+
+        # ── reactor ───────────────────────────────────────────────────────────
+        self.cv = tk.Canvas(root, width=130, height=130,
+                            bg=BG, highlightthickness=0)
+        self.cv.pack(pady=(8, 2))
+        self.cv.bind("<ButtonPress-1>", self._drag_start)
+        self.cv.bind("<B1-Motion>",     self._drag_move)
+        self._build_reactor(self.cv, 65, 65, CYAN)
+
+        # ── estado ────────────────────────────────────────────────────────────
+        self._state_var = tk.StringVar(value="🔵  ESCUCHANDO")
+        tk.Label(root, textvariable=self._state_var,
+                 bg=BG, fg=CYAN, font=("Consolas", 9)).pack(pady=(0, 4))
+
+        # ── separador ─────────────────────────────────────────────────────────
+        tk.Frame(root, bg="#1a1a3a", height=1).pack(fill="x", padx=16)
+
+        # ── volumen ───────────────────────────────────────────────────────────
+        vf = tk.Frame(root, bg=BG)
+        vf.pack(fill="x", padx=16, pady=(6, 2))
+        tk.Label(vf, text="VOL", bg=BG, fg="#444466",
+                 font=("Consolas", 8)).pack(side="left")
+        self._vol = tk.DoubleVar(value=1.0)
+        self._vol_lbl = tk.Label(vf, text="100%", bg=BG, fg="#666688",
+                                 font=("Consolas", 8), width=5)
+        self._vol_lbl.pack(side="right")
+        tk.Scale(vf, from_=0.0, to=1.0, resolution=0.05,
+                 orient="horizontal", variable=self._vol,
+                 bg=BG, fg=CYAN, troughcolor=CARD,
+                 highlightthickness=0, sliderrelief="flat",
+                 showvalue=False, length=190,
+                 activebackground=CYAN,
+                 command=self._on_volume).pack(side="left", padx=(6, 0))
+
+        # ── botones Pausar / Parar ─────────────────────────────────────────────
+        bf = tk.Frame(root, bg=BG)
+        bf.pack(fill="x", padx=14, pady=(4, 2))
+        self._pause_btn = _btn(bf, "⏸  PAUSAR", CYAN, self._on_pause,
+                               bg=CARD, hover_bg="#1c1c40")
+        self._pause_btn.pack(side="left", expand=True, fill="x", padx=(0, 3), ipady=3)
+        _btn(bf, "⏹  PARAR", self.RED, self._on_stop,
+             bg=CARD, hover_bg="#2a0a14").pack(side="right", expand=True, fill="x", ipady=3)
+
+        # ── botón configuración ────────────────────────────────────────────────
+        _btn(root, "⚙  CONFIGURACIÓN", "#7777aa", self._on_settings,
+             bg=BAR, hover_bg=CARD,
+             font=("Consolas", 9)).pack(fill="x", padx=14, pady=(3, 10), ipady=4)
+
+    def _build_reactor(self, cv, cx, cy, color):
+        """Dibuja el arc reactor en un Canvas dado."""
+        r = min(cx, cy) - 6
+        cv.create_oval(cx-r,   cy-r,   cx+r,   cy+r,   outline=color, width=1,  fill="", tags="r3")
+        cv.create_oval(cx-r+16, cy-r+16, cx+r-16, cy+r-16, outline=color, width=2, fill="", tags="r2")
+        cv.create_oval(cx-r+30, cy-r+30, cx+r-30, cy+r-30, outline=color, width=2,
+                       fill=self.BG, tags="r1")
+        cv.create_oval(cx-12, cy-12, cx+12, cy+12, outline="", fill=color, tags="core")
+        for deg in range(0, 360, 60):
+            rad = math.radians(deg)
+            x1 = cx + (r-28) * math.cos(rad); y1 = cy + (r-28) * math.sin(rad)
+            x2 = cx + (r-10) * math.cos(rad); y2 = cy + (r-10) * math.sin(rad)
+            cv.create_line(x1, y1, x2, y2, fill=color, width=1, tags="spoke")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MODO MINI + POPUP
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _toggle_mini(self):
+        self._mini = not self._mini
+        if self._mini:
+            # guardar posición actual antes de achicarse
+            self._x_full = self.root.winfo_x()
+            self._y_full = self.root.winfo_y()
+            # destruir contenido y reconstruir mini
+            for w in self.root.winfo_children():
+                w.destroy()
+            self._build_mini_root()
+            self.root.geometry(
+                f"{self.W_MINI}x{self.H_MINI}+{self._x_mini}+{self._y_mini}")
+        else:
+            if self._popup:
+                self._popup.destroy()
+                self._popup = None
+            for w in self.root.winfo_children():
+                w.destroy()
+            self._build_full()
+            self.root.geometry(
+                f"{self.W_FULL}x{self.H_FULL}+{self._x_full}+{self._y_full}")
+
+    def _build_mini_root(self):
+        tk   = self.tk
         root = self.root
         BG   = self.BG
         CYAN = self.CYAN
 
-        # barra de título
-        bar = tk.Frame(root, bg="#0d0d28", height=26)
-        bar.pack(fill="x")
-        bar.bind("<ButtonPress-1>", self._drag_start)
-        bar.bind("<B1-Motion>",     self._drag_move)
-        bar.pack_propagate(False)
-
-        tk.Label(bar, text="  ◈  J.A.R.V.I.S.", bg="#0d0d28",
-                 fg=CYAN, font=("Consolas", 10, "bold"),
-                 cursor="fleur").pack(side="left", pady=3)
-        tk.Label(bar, text="", bg="#0d0d28").pack(side="left", expand=True)
-        tk.Button(bar, text="  ─  ", bg="#0d0d28", fg="#888888",
-                  font=("Consolas", 9), bd=0,
-                  activebackground="#1a1a3a", activeforeground=CYAN,
-                  cursor="hand2",
-                  command=self._minimize_to_tray).pack(side="right", pady=1, padx=2)
-
-        # ── arc reactor ──────────────────────────────────────────────────────
-        self.cv = tk.Canvas(root, width=130, height=130,
+        root.configure(bg=BG)
+        self.cv = tk.Canvas(root, width=self.W_MINI, height=self.H_MINI,
                             bg=BG, highlightthickness=0)
-        self.cv.pack(pady=(10, 2))
+        self.cv.pack()
+        cx = cy = self.W_MINI // 2
+        self._build_reactor(self.cv, cx, cy, CYAN)
 
-        cx = cy = 65
-        # anillos (exterior → interior)
-        self._r3 = self.cv.create_oval(cx-58, cy-58, cx+58, cy+58,
-                                       outline=CYAN, width=1, fill="")
-        self._r2 = self.cv.create_oval(cx-42, cy-42, cx+42, cy+42,
-                                       outline=CYAN, width=2, fill="")
-        self._r1 = self.cv.create_oval(cx-26, cy-26, cx+26, cy+26,
-                                       outline=CYAN, width=2, fill=BG)
-        self._core = self.cv.create_oval(cx-14, cy-14, cx+14, cy+14,
-                                         outline="", fill=CYAN)
-        # líneas radiales estilo reactor
-        for deg in range(0, 360, 60):
-            rad = math.radians(deg)
-            x1 = cx + 18 * math.cos(rad); y1 = cy + 18 * math.sin(rad)
-            x2 = cx + 38 * math.cos(rad); y2 = cy + 38 * math.sin(rad)
-            self.cv.create_line(x1, y1, x2, y2, fill=CYAN, width=1, tags="spoke")
+        # hover → mostrar popup
+        self.cv.bind("<Enter>", self._on_mini_enter)
+        self.cv.bind("<Leave>", self._on_mini_leave)
+        root.bind("<Enter>",   self._on_mini_enter)
+        root.bind("<Leave>",   self._on_mini_leave)
+        root.bind("<ButtonPress-1>", self._drag_start)
+        root.bind("<B1-Motion>",     self._drag_move)
 
-        # ── estado texto ──────────────────────────────────────────────────────
-        self._state_var = tk.StringVar(value="IDLE")
-        tk.Label(root, textvariable=self._state_var,
-                 bg=BG, fg=CYAN, font=("Consolas", 9)).pack(pady=(2, 4))
+    def _on_mini_enter(self, _event=None):
+        if self._hide_id:
+            self.root.after_cancel(self._hide_id)
+            self._hide_id = None
+        if not self._popup:
+            self._show_popup()
 
-        # ── volumen ───────────────────────────────────────────────────────────
-        vf = tk.Frame(root, bg=BG)
-        vf.pack(fill="x", padx=18, pady=(0, 4))
-        tk.Label(vf, text="VOL", bg=BG, fg="#555577",
+    def _on_mini_leave(self, _event=None):
+        self._hide_id = self.root.after(300, self._maybe_hide_popup)
+
+    def _maybe_hide_popup(self):
+        if not self._popup_inside and self._popup:
+            self._popup.destroy()
+            self._popup = None
+
+    def _show_popup(self):
+        tk   = self.tk
+        BG   = self.BG
+        CARD = self.CARD
+        CYAN = self.CYAN
+
+        pop = tk.Toplevel(self.root)
+        self._popup = pop
+        pop.overrideredirect(True)
+        pop.attributes("-topmost", True)
+        pop.configure(bg=BG,
+                      highlightthickness=1, highlightbackground="#1a1a3a")
+
+        W = 180
+        rx = self.root.winfo_x()
+        ry = self.root.winfo_y()
+        # posicionar a la izquierda del icono mini
+        px = rx - W - 6
+        if px < 0:
+            px = rx + self.W_MINI + 6
+        pop.geometry(f"{W}x{230}+{px}+{ry}")
+
+        # estado
+        self._popup_state = tk.StringVar(value="🔵  ESCUCHANDO")
+        tk.Label(pop, textvariable=self._popup_state,
+                 bg=BG, fg=CYAN, font=("Consolas", 8)).pack(pady=(8, 4))
+
+        tk.Frame(pop, bg="#1a1a3a", height=1).pack(fill="x", padx=10)
+
+        # volumen compacto
+        vf = tk.Frame(pop, bg=BG)
+        vf.pack(fill="x", padx=10, pady=4)
+        tk.Label(vf, text="VOL", bg=BG, fg="#444466",
                  font=("Consolas", 8)).pack(side="left")
-        self._vol = tk.DoubleVar(value=1.0)
+        if not hasattr(self, "_vol"):
+            self._vol = tk.DoubleVar(value=1.0)
         tk.Scale(vf, from_=0.0, to=1.0, resolution=0.05,
                  orient="horizontal", variable=self._vol,
-                 bg=BG, fg=CYAN, troughcolor="#14142b",
+                 bg=BG, fg=CYAN, troughcolor=CARD,
                  highlightthickness=0, sliderrelief="flat",
-                 showvalue=False, length=210,
+                 showvalue=False, length=110,
+                 activebackground=CYAN,
                  command=self._on_volume).pack(side="right")
 
-        # ── botones principales ───────────────────────────────────────────────
-        bf = tk.Frame(root, bg=BG)
-        bf.pack(fill="x", padx=14, pady=(2, 2))
+        tk.Frame(pop, bg="#1a1a3a", height=1).pack(fill="x", padx=10)
 
-        self._pause_btn = tk.Button(
-            bf, text="⏸  PAUSAR",
-            bg=self.CARD, fg=CYAN, font=("Consolas", 9, "bold"),
-            bd=0, padx=8, pady=7,
-            activebackground="#1e1e3a", activeforeground=CYAN,
-            cursor="hand2", command=self._on_pause)
-        self._pause_btn.pack(side="left", expand=True, fill="x", padx=(0, 3))
+        # botones
+        for txt, fg, cmd in [
+            ("⏸  Pausar/Reanudar", CYAN,      self._on_pause),
+            ("⚙  Configuración",   "#7777aa",  self._on_settings),
+            ("⊞  Expandir panel",  "#556688",  self._toggle_mini),
+            ("⏹  Parar",           self.RED,   self._on_stop),
+        ]:
+            _btn(pop, txt, fg, cmd, bg=BG, hover_bg=CARD,
+                 font=("Consolas", 9), padx=6, pady=5).pack(
+                     fill="x", padx=8, pady=1)
 
-        tk.Button(
-            bf, text="⏹  PARAR",
-            bg=self.CARD, fg=self.RED, font=("Consolas", 9, "bold"),
-            bd=0, padx=8, pady=7,
-            activebackground="#2a0a14", activeforeground=self.RED,
-            cursor="hand2", command=self._on_stop
-        ).pack(side="right", expand=True, fill="x")
+        # para evitar que el popup desaparezca al entrar en él
+        pop.bind("<Enter>", lambda _: self._set_popup_inside(True))
+        pop.bind("<Leave>", lambda _: self._set_popup_inside(False))
 
-        # ── botón configuración ───────────────────────────────────────────────
-        tk.Button(
-            root, text="⚙  CONFIGURACIÓN",
-            bg="#0d0d28", fg="#7777aa", font=("Consolas", 9),
-            bd=0, pady=7,
-            activebackground=self.CARD, activeforeground=CYAN,
-            cursor="hand2", command=self._on_settings
-        ).pack(fill="x", padx=14, pady=(2, 10))
+    def _set_popup_inside(self, val):
+        self._popup_inside = val
+        if not val:
+            self._hide_id = self.root.after(300, self._maybe_hide_popup)
+        elif self._hide_id:
+            self.root.after_cancel(self._hide_id)
+            self._hide_id = None
 
-    # ── animación del reactor ─────────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ANIMACIÓN
+    # ═══════════════════════════════════════════════════════════════════════════
 
     def _animate(self):
         self._tick += 1
         t = self._tick
-
-        pulse = 0.4 + 0.6 * abs(math.sin(t * 0.06))
+        pulse = 0.35 + 0.65 * abs(math.sin(t * 0.07))
 
         with state_lock:
             s = state
 
         if s == State.RECORDING:
-            color      = self.RED
-            lbl        = "🔴  GRABANDO..."
+            color = self.RED
+            lbl   = "🔴  GRABANDO..."
         elif s == State.PROCESSING:
-            color      = self.GOLD
-            lbl        = "⚡  PROCESANDO..."
+            # parpadeo dorado
+            color = self.GOLD if (t // 6) % 2 == 0 else "#aa8800"
+            lbl   = "⚡  PROCESANDO..."
         else:
-            # IDLE: pulso suave en el anillo exterior
-            v = int(pulse * 0xff)
+            v = int((0x88 + int(0x77 * pulse)) & 0xff)
             color = f"#00{v:02x}ff"
             lbl   = "⏸  PAUSADO" if paused else "🔵  ESCUCHANDO"
 
-        self.cv.itemconfig(self._core, fill=color)
-        self.cv.itemconfig(self._r1,  outline=color)
-        self.cv.itemconfig(self._r2,  outline=color)
-        self.cv.itemconfig(self._r3,  outline=color)
-        self.cv.itemconfig("spoke",   fill=color)
-        self._state_var.set(lbl)
+        if hasattr(self, "cv") and self.cv.winfo_exists():
+            for tag in ("core", "r1", "r2", "r3", "spoke"):
+                try:
+                    if tag == "core":
+                        self.cv.itemconfig(tag, fill=color)
+                    else:
+                        self.cv.itemconfig(tag, outline=color if tag != "spoke" else "",
+                                           fill=color if tag == "spoke" else "")
+                except Exception:
+                    pass
+            # fix: core fill, rings outline, spokes fill
+            try:
+                self.cv.itemconfig("core",  fill=color, outline="")
+                self.cv.itemconfig("r1",    outline=color, fill=self.BG)
+                self.cv.itemconfig("r2",    outline=color, fill="")
+                self.cv.itemconfig("r3",    outline=color, fill="")
+                self.cv.itemconfig("spoke", fill=color)
+            except Exception:
+                pass
 
-        if paused:
-            self._pause_btn.config(text="▶  REANUDAR", fg=self.GOLD)
-        else:
-            self._pause_btn.config(text="⏸  PAUSAR",   fg=self.CYAN)
+        if hasattr(self, "_state_var"):
+            self._state_var.set(lbl)
+        if hasattr(self, "_popup_state") and self._popup and self._popup.winfo_exists():
+            self._popup_state.set(lbl)
+
+        # actualizar botón pausa si existe
+        if hasattr(self, "_pause_btn") and self._pause_btn.winfo_exists():
+            if paused:
+                self._pause_btn.config(text="▶  REANUDAR", fg=self.GOLD)
+            else:
+                self._pause_btn.config(text="⏸  PAUSAR",   fg=self.CYAN)
 
         self.root.after(50, self._animate)
 
-    # ── sondeo de cola para auth ──────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════════════
+    # COLA AUTH
+    # ═══════════════════════════════════════════════════════════════════════════
 
     def _poll_queue(self):
         try:
@@ -1221,11 +1478,15 @@ class JarvisControlPanel:
             pass
         self.root.after(200, self._poll_queue)
 
-    # ── callbacks ─────────────────────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════════════
+    # CALLBACKS
+    # ═══════════════════════════════════════════════════════════════════════════
 
     def _on_volume(self, val):
         global JARVIS_VOLUME
         JARVIS_VOLUME = float(val)
+        if hasattr(self, "_vol_lbl") and self._vol_lbl.winfo_exists():
+            self._vol_lbl.config(text=f"{int(float(val)*100)}%")
 
     def _on_pause(self):
         global paused
@@ -1240,12 +1501,20 @@ class JarvisControlPanel:
         os._exit(0)
 
     def _on_settings(self):
+        if self._popup:
+            self._popup.destroy()
+            self._popup = None
         SettingsPanel(self.root, self.cfg)
 
-    # ── minimizar a bandeja ───────────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════════════
+    # BANDEJA
+    # ═══════════════════════════════════════════════════════════════════════════
 
-    def _minimize_to_tray(self):
+    def _to_tray(self):
         self.root.withdraw()
+        if self._popup:
+            self._popup.destroy()
+            self._popup = None
         self._start_tray()
 
     def _start_tray(self):
@@ -1256,36 +1525,34 @@ class JarvisControlPanel:
             self.root.deiconify()
             return
 
-        def _mk_icon():
+        def _mk():
             img  = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
             draw.ellipse([4,  4,  60, 60], fill=(10, 10, 40, 255))
-            draw.ellipse([14, 14, 50, 50], outline=(0, 212, 255, 230), width=2)
+            draw.ellipse([14, 14, 50, 50], outline=(0, 212, 255, 220), width=2)
             draw.ellipse([26, 26, 38, 38], fill=(0, 212, 255, 255))
             return img
 
-        def _on_show(icon, item):
-            icon.stop()
-            self._tray_icon = None
-            self.root.deiconify()
-            self.root.lift()
+        def _show(icon, _):
+            icon.stop(); self._tray_icon = None
+            self.root.deiconify(); self.root.lift()
 
-        def _on_quit(icon, item):
-            icon.stop()
-            os._exit(0)
+        def _quit(icon, _):
+            icon.stop(); os._exit(0)
 
         icon = pystray.Icon(
-            "omni-jarvis", _mk_icon(), "J.A.R.V.I.S.",
-            menu=pystray.Menu(
-                pystray.MenuItem("Mostrar panel", _on_show, default=True),
+            "jarvis", _mk(), "J.A.R.V.I.S.",
+            pystray.Menu(
+                pystray.MenuItem("Mostrar panel", _show, default=True),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Salir", _on_quit),
-            )
-        )
+                pystray.MenuItem("Salir", _quit),
+            ))
         self._tray_icon = icon
         threading.Thread(target=icon.run, daemon=True, name="tray").start()
 
-    # ── arrastre ──────────────────────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ARRASTRE
+    # ═══════════════════════════════════════════════════════════════════════════
 
     def _drag_start(self, event):
         self._drag_x = event.x
@@ -1295,6 +1562,10 @@ class JarvisControlPanel:
         x = self.root.winfo_x() + (event.x - self._drag_x)
         y = self.root.winfo_y() + (event.y - self._drag_y)
         self.root.geometry(f"+{x}+{y}")
+        if not self._mini:
+            self._x_full, self._y_full = x, y
+        else:
+            self._x_mini, self._y_mini = x, y
 
     def run(self):
         self.root.mainloop()
