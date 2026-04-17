@@ -1,0 +1,27 @@
+# Omni-Jarvis Client — instala con: pip install -r requirements.txt
+#
+# NOTA: en macOS puede que necesites:  brew install portaudio
+# NOTA: en Windows instala primero:    pip install pipwin && pipwin install pyaudio
+
+# Wake word "Jarvis" (100% local, sin registro, sin API key)
+openwakeword>=0.6.0
+onnxruntime>=1.16.0        # motor de inferencia para openwakeword
+
+# Audio: grabación y reproducción
+sounddevice>=0.4.6
+soundfile>=0.12.1
+numpy>=1.26.0
+
+# Captura de pantalla y webcam
+mss>=9.0.2
+Pillow>=10.0.0
+opencv-python>=4.8.0
+
+# Control de ratón y teclado
+pyautogui>=0.9.54
+
+# WebSocket
+websockets>=12.0
+
+# Icono en bandeja del sistema
+pystray>=0.19.5
