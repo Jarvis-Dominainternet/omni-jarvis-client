@@ -35,11 +35,18 @@ from pathlib import Path
 
 import numpy as np
 
-# ── logging ───────────────────────────────────────────────────────────────────
+# ── logging — a consola + siempre a archivo (pythonw.exe no tiene consola) ────
+_LOG_FILE = Path(__file__).parent / "jarvis.log"
+_log_handlers: list[logging.Handler] = [
+    logging.FileHandler(_LOG_FILE, encoding="utf-8", mode="a"),
+]
+if sys.stdout is not None:          # python normal (con consola)
+    _log_handlers.append(logging.StreamHandler())
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)-5s %(message)s",
     datefmt="%H:%M:%S",
+    handlers=_log_handlers,
 )
 log = logging.getLogger("jarvis-client")
 
@@ -424,9 +431,37 @@ class State:
     PROCESSING = "processing" # enviando al servidor
 
 state         = State.IDLE
-paused        = False
 state_lock    = threading.Lock()
-JARVIS_VOLUME: float = 1.0   # 0.0–1.0, controlado desde el panel de control
+
+# Usamos threading.Event para paused: thread-safe sin GIL-dependency
+_paused_event = threading.Event()   # set() = pausado, clear() = activo
+
+def is_paused() -> bool:
+    return _paused_event.is_set()
+
+def set_paused(v: bool):
+    if v: _paused_event.set()
+    else: _paused_event.clear()
+
+# Volumen: float protegido con lock
+_volume_lock  = threading.Lock()
+_jarvis_volume: float = 1.0
+
+def get_volume() -> float:
+    with _volume_lock:
+        return _jarvis_volume
+
+def set_volume(v: float):
+    global _jarvis_volume
+    with _volume_lock:
+        _jarvis_volume = max(0.0, min(1.0, float(v)))
+
+# Modo observación — acumula screenshots para pregunta final
+_watch_mode    = False
+_watch_lock    = threading.Lock()
+_watch_shots:  list[str] = []          # lista de b64 JPEG
+_watch_max     = 8                     # máximo de capturas acumuladas
+_watch_interval = 4.0                  # segundos entre capturas
 
 send_queue        : queue.Queue = queue.Queue()
 action_queue      : queue.Queue = queue.Queue()
@@ -461,6 +496,81 @@ def take_screenshot() -> str:
         log.error(f"Screenshot error: {e}")
         return ""
 
+# ── Modo observación — collage de screenshots ─────────────────────────────────
+
+def _make_collage(shots: list[str]) -> str:
+    """Une varias capturas en una cuadrícula 2-columnas y devuelve b64 JPEG."""
+    try:
+        from PIL import Image
+        import math as _math
+        images = []
+        for b64 in shots:
+            try:
+                data = base64.b64decode(b64)
+                img  = Image.open(io.BytesIO(data)).convert("RGB")
+                img.thumbnail((640, 360))
+                images.append(img)
+            except Exception:
+                pass
+        if not images:
+            return take_screenshot()
+        cols  = 2
+        rows  = _math.ceil(len(images) / cols)
+        W, H  = 640, 360
+        grid  = Image.new("RGB", (cols * W, rows * H), (10, 10, 26))
+        for i, img in enumerate(images):
+            x = (i % cols) * W
+            y = (i // cols) * H
+            grid.paste(img, (x, y))
+        buf = io.BytesIO()
+        grid.save(buf, format="JPEG", quality=70)
+        return base64.b64encode(buf.getvalue()).decode()
+    except Exception as e:
+        log.error(f"collage error: {e}")
+        return take_screenshot()
+
+
+def _watch_loop():
+    """Hilo de modo observación: captura pantalla cada N segundos."""
+    global _watch_mode
+    log.info(f"Modo observación iniciado (cada {_watch_interval}s, máx {_watch_max})")
+    while True:
+        time.sleep(_watch_interval)
+        with _watch_lock:
+            if not _watch_mode:
+                break
+            if len(_watch_shots) < _watch_max:
+                shot = take_screenshot()
+                if shot:
+                    _watch_shots.append(shot)
+                    log.debug(f"Observación: {len(_watch_shots)}/{_watch_max} capturas")
+            else:
+                log.info("Modo observación: buffer lleno, deteniendo capturas")
+                break
+    with _watch_lock:
+        _watch_mode = False
+    log.info("Modo observación terminado")
+
+
+def start_watch_mode():
+    global _watch_mode
+    with _watch_lock:
+        if _watch_mode:
+            return
+        _watch_mode = True
+        _watch_shots.clear()
+    threading.Thread(target=_watch_loop, daemon=True, name="watch").start()
+    log.info("Modo observación activado — di 'Jarvis' cuando quieras preguntar")
+
+
+def stop_watch_mode():
+    global _watch_mode
+    with _watch_lock:
+        _watch_mode = False
+        _watch_shots.clear()
+    log.info("Modo observación desactivado")
+
+
 # ── VAD simple: energía RMS ───────────────────────────────────────────────────
 def rms(chunk: np.ndarray) -> float:
     return float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2)))
@@ -473,7 +583,7 @@ def audio_loop(cfg: dict):
     2. Al detectarla: pitido, graba con VAD hasta silencio.
     3. Empaqueta audio + screenshot y lo pone en send_queue.
     """
-    global state, paused
+    global state
 
     # ── cargar openwakeword ───────────────────────────────────────────────────
     try:
@@ -513,7 +623,7 @@ def audio_loop(cfg: dict):
         blocksize=OWW_FRAME,
     ) as stream:
         while True:
-            if paused:
+            if is_paused():
                 time.sleep(0.1)
                 continue
 
@@ -554,9 +664,20 @@ def audio_loop(cfg: dict):
                           and elapsed >= MIN_SEC):
                         log.info(f"Fin de grabación ({elapsed:.1f}s, {len(recording_frames)} frames)")
 
-                        screenshot_b64 = take_screenshot() if cfg.get("screenshot_on_send", True) else ""
-                        webcam_b64     = take_webcam_frame(cfg) if cfg.get("webcam_on_send", False) else ""
-                        audio_wav      = frames_to_wav(recording_frames)
+                        # si hay shots acumulados en modo observación, crear collage
+                        with _watch_lock:
+                            watch_shots = list(_watch_shots)
+                            _watch_shots.clear()
+                            was_watching = _watch_mode
+
+                        if was_watching and watch_shots:
+                            screenshot_b64 = _make_collage(watch_shots)
+                            log.info(f"Modo observación: {len(watch_shots)} capturas → collage")
+                        else:
+                            screenshot_b64 = take_screenshot() if cfg.get("screenshot_on_send", True) else ""
+
+                        webcam_b64 = take_webcam_frame(cfg) if cfg.get("webcam_on_send", False) else ""
+                        audio_wav  = frames_to_wav(recording_frames)
                         if not audio_wav:
                             log.warning("frames_to_wav vacío — ignorando grabación")
                             with state_lock:
@@ -800,7 +921,7 @@ def action_loop():
                     tmp = f.name
                 arr, sr = sf.read(tmp)
                 log.info("Reproduciendo respuesta de Jarvis...")
-                sd.play(arr * float(JARVIS_VOLUME), sr)
+                sd.play(arr * get_volume(), sr)
                 sd.wait()
             except Exception as e:
                 log.error(f"Error reproduciendo audio: {e}")
@@ -883,6 +1004,13 @@ def _execute_action(act: dict, pyautogui):
                 threading.Thread(target=_cleanup, args=(tmp_path,), daemon=True).start()
             except Exception as e:
                 log.error(f"show_html error: {e}")
+
+    elif t == "watch_screen":
+        # activar modo observación: Jarvis captura pantalla cada N segundos
+        start_watch_mode()
+
+    elif t == "stop_watch":
+        stop_watch_mode()
 
     elif t == "notify":
         # notificación del sistema (Linux: notify-send, macOS: osascript)
@@ -1334,21 +1462,29 @@ class JarvisControlPanel:
     def _toggle_mini(self):
         self._mini = not self._mini
         if self._mini:
-            # guardar posición actual antes de achicarse
             self._x_full = self.root.winfo_x()
             self._y_full = self.root.winfo_y()
-            # destruir contenido y reconstruir mini
+            # limpiar canvas items antes de destruir widgets (evita memory leak)
+            if hasattr(self, "cv"):
+                try: self.cv.delete("all")
+                except Exception: pass
             for w in self.root.winfo_children():
-                w.destroy()
+                try: w.destroy()
+                except Exception: pass
             self._build_mini_root()
             self.root.geometry(
                 f"{self.W_MINI}x{self.H_MINI}+{self._x_mini}+{self._y_mini}")
         else:
             if self._popup:
-                self._popup.destroy()
+                try: self._popup.destroy()
+                except Exception: pass
                 self._popup = None
+            if hasattr(self, "cv"):
+                try: self.cv.delete("all")
+                except Exception: pass
             for w in self.root.winfo_children():
-                w.destroy()
+                try: w.destroy()
+                except Exception: pass
             self._build_full()
             self.root.geometry(
                 f"{self.W_FULL}x{self.H_FULL}+{self._x_full}+{self._y_full}")
@@ -1480,7 +1616,7 @@ class JarvisControlPanel:
             else:
                 v = int((0x88 + int(0x77 * pulse)) & 0xff)
                 color = f"#00{v:02x}ff"
-                lbl   = "⏸  PAUSADO" if paused else "🔵  ESCUCHANDO"
+                lbl   = "⏸  PAUSADO" if is_paused() else "🔵  ESCUCHANDO"
 
             if hasattr(self, "cv") and self.cv.winfo_exists():
                 try:
@@ -1504,7 +1640,7 @@ class JarvisControlPanel:
             if hasattr(self, "_pause_btn"):
                 try:
                     if self._pause_btn.winfo_exists():
-                        if paused:
+                        if is_paused():
                             self._pause_btn.config(text="▶  REANUDAR", fg=self.GOLD)
                         else:
                             self._pause_btn.config(text="⏸  PAUSAR",   fg=self.CYAN)
@@ -1533,15 +1669,13 @@ class JarvisControlPanel:
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _on_volume(self, val):
-        global JARVIS_VOLUME
-        JARVIS_VOLUME = float(val)
+        set_volume(float(val))
         if hasattr(self, "_vol_lbl") and self._vol_lbl.winfo_exists():
             self._vol_lbl.config(text=f"{int(float(val)*100)}%")
 
     def _on_pause(self):
-        global paused
-        paused = not paused
-        log.info("Jarvis pausado" if paused else "Jarvis reanudado")
+        set_paused(not is_paused())
+        log.info("Jarvis pausado" if is_paused() else "Jarvis reanudado")
 
     def _on_stop(self):
         log.info("Cerrando Omni-Jarvis...")
