@@ -77,104 +77,163 @@ def save_config(cfg: dict):
 
 # ── Detección automática de dispositivos ─────────────────────────────────────
 
-def detect_devices(cfg: dict) -> dict:
-    """
-    Detecta micrófonos, altavoces y webcams disponibles.
-    Muestra la lista, deja elegir o usa el primero de cada categoría.
-    Guarda la selección en config y marca devices_detected=True.
-    """
-    print("\n" + "═"*56)
-    print("  J.A.R.V.I.S. — Detección de dispositivos")
-    print("═"*56)
+def _gui_style(root):
+    """Aplica tema oscuro Iron Man a una ventana tkinter."""
+    import tkinter.ttk as ttk
+    BG   = "#0d0d1a"
+    CARD = "#14142b"
+    CYAN = "#00d4ff"
+    root.configure(bg=BG)
+    style = ttk.Style(root)
+    style.theme_use("clam")
+    style.configure(".",             background=BG, foreground="#cccccc", font=("Consolas", 10))
+    style.configure("TFrame",        background=BG)
+    style.configure("Card.TFrame",   background=CARD)
+    style.configure("TLabel",        background=BG, foreground="#cccccc", font=("Consolas", 10))
+    style.configure("Title.TLabel",  background=BG, foreground=CYAN,     font=("Consolas", 13, "bold"))
+    style.configure("Sub.TLabel",    background=BG, foreground="#888888", font=("Consolas", 9))
+    style.configure("Card.TLabel",   background=CARD, foreground="#cccccc", font=("Consolas", 10))
+    style.configure("TCombobox",     fieldbackground=CARD, background=CARD,
+                    foreground="#cccccc", selectbackground="#1e1e3a", font=("Consolas", 10))
+    style.configure("TCheckbutton",  background=BG, foreground="#cccccc", font=("Consolas", 10))
+    style.configure("Cyan.TButton",  background=CYAN, foreground="#000000",
+                    font=("Consolas", 11, "bold"), padding=8)
+    style.map("Cyan.TButton", background=[("active", "#00aacc")])
+    style.configure("TEntry",        fieldbackground=CARD, foreground="#cccccc",
+                    insertcolor=CYAN, font=("Consolas", 11))
 
-    # ── Audio ─────────────────────────────────────────────────────────────────
+
+def detect_devices(cfg: dict) -> dict:
+    """Ventana GUI para seleccionar micrófono, altavoz y webcam."""
+    import tkinter as tk
+    import tkinter.ttk as ttk
+
+    # ── recopilar dispositivos ────────────────────────────────────────────────
+    mics, speakers, webcams = [], [], []
+    screen_info = ""
+    default_mic = default_spk = None
+
     try:
         import sounddevice as sd
-        devices = sd.query_devices()
-        mics     = [(i, d) for i, d in enumerate(devices) if d["max_input_channels"]  > 0]
-        speakers = [(i, d) for i, d in enumerate(devices) if d["max_output_channels"] > 0]
+        devs = sd.query_devices()
+        default_mic = sd.default.device[0]
+        default_spk = sd.default.device[1]
+        mics     = [(i, d["name"]) for i, d in enumerate(devs) if d["max_input_channels"]  > 0]
+        speakers = [(i, d["name"]) for i, d in enumerate(devs) if d["max_output_channels"] > 0]
+    except Exception:
+        pass
 
-        print(f"\n  MICRÓFONOS ({len(mics)} encontrados):")
-        for i, (idx, d) in enumerate(mics):
-            marker = "  [defecto]" if idx == sd.default.device[0] else ""
-            print(f"    {i}) [{idx}] {d['name']}{marker}")
-
-        print(f"\n  ALTAVOCES ({len(speakers)} encontrados):")
-        for i, (idx, d) in enumerate(speakers):
-            marker = "  [defecto]" if idx == sd.default.device[1] else ""
-            print(f"    {i}) [{idx}] {d['name']}{marker}")
-
-        if mics:
-            try:
-                sel = input(f"\n  Selecciona micrófono [Enter = defecto]: ").strip()
-                cfg["mic_device"] = mics[int(sel)][0] if sel else None
-            except Exception:
-                cfg["mic_device"] = None
-
-        if speakers:
-            try:
-                sel = input(f"  Selecciona altavoz   [Enter = defecto]: ").strip()
-                cfg["speaker_device"] = speakers[int(sel)][0] if sel else None
-            except Exception:
-                cfg["speaker_device"] = None
-
-    except Exception as e:
-        print(f"  [!] sounddevice no disponible: {e}")
-
-    # ── Webcam ────────────────────────────────────────────────────────────────
-    print(f"\n  CÁMARAS / ENTRADAS DE VÍDEO:")
-    webcams_found = []
     try:
         import cv2
-        for idx in range(8):
+        for idx in range(6):
             cap = cv2.VideoCapture(idx)
             if cap.isOpened():
                 w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                webcams_found.append((idx, f"{w}x{h}"))
+                webcams.append((idx, f"Cámara {idx}  ({w}x{h})"))
                 cap.release()
-        if webcams_found:
-            for i, (idx, res) in enumerate(webcams_found):
-                print(f"    {i}) Cámara {idx} — {res}")
-            try:
-                sel = input(f"  Selecciona cámara    [Enter = primera]: ").strip()
-                cfg["webcam_device"] = webcams_found[int(sel) if sel else 0][0]
-            except Exception:
-                cfg["webcam_device"] = webcams_found[0][0] if webcams_found else None
-        else:
-            print("    (ninguna detectada)")
-            cfg["webcam_device"] = None
     except ImportError:
-        print("    (opencv no instalado — solo captura de pantalla disponible)")
-        cfg["webcam_device"] = None
+        pass
 
-    # ── Pantalla ──────────────────────────────────────────────────────────────
-    print(f"\n  CAPTURA DE PANTALLA:")
     try:
         import mss
         with mss.mss() as sct:
-            monitors = sct.monitors[1:]
-        for i, m in enumerate(monitors):
-            print(f"    Monitor {i+1}: {m['width']}x{m['height']} en ({m['left']},{m['top']})")
-        print("    ✓ Captura de pantalla disponible")
+            mons = sct.monitors[1:]
+        screen_info = "  ".join(f"Monitor {i+1}: {m['width']}x{m['height']}" for i, m in enumerate(mons))
         cfg["screenshot_on_send"] = True
-    except Exception as e:
-        print(f"    [!] mss no disponible: {e}")
+    except Exception:
+        screen_info = "No disponible"
         cfg["screenshot_on_send"] = False
 
-    # ── Webcam junto con screenshot ───────────────────────────────────────────
-    if cfg.get("webcam_device") is not None:
+    # ── construir ventana ─────────────────────────────────────────────────────
+    root = tk.Tk()
+    root.title("J.A.R.V.I.S. — Configuración")
+    root.resizable(False, False)
+    _gui_style(root)
+
+    # centrar en pantalla
+    root.update_idletasks()
+    W, H = 480, 480
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"{W}x{H}+{(sw-W)//2}+{(sh-H)//2}")
+
+    pad = {"padx": 20, "pady": 6}
+
+    ttk.Label(root, text="🤖  J.A.R.V.I.S.", style="Title.TLabel").pack(pady=(20, 2))
+    ttk.Label(root, text="Configuración de dispositivos", style="Sub.TLabel").pack(pady=(0, 16))
+
+    def row(label, items, default_idx):
+        """Crea una fila con etiqueta y combobox."""
+        ttk.Label(root, text=label).pack(anchor="w", padx=24, pady=(8, 1))
+        names   = ["— predeterminado del sistema —"] + [n for _, n in items]
+        indexes = [None] + [i for i, _ in items]
+        var = tk.StringVar()
+        cb  = ttk.Combobox(root, textvariable=var, values=names,
+                           state="readonly", width=52)
+        # preseleccionar defecto
         try:
-            sel = input("\n  ¿Enviar también imagen de webcam junto con la pantalla? [s/N]: ").strip().lower()
-            cfg["webcam_on_send"] = sel in ("s", "si", "sí", "y", "yes")
+            pre = next((j+1 for j, (i,_) in enumerate(items) if i == default_idx), 0)
+            cb.current(pre)
         except Exception:
-            cfg["webcam_on_send"] = False
+            cb.current(0)
+        cb.pack(padx=24, pady=(0, 2))
+        return var, indexes, names
 
-    cfg["devices_detected"] = True
-    save_config(cfg)
+    mic_var,  mic_idxs,  mic_names  = row("🎙️  Micrófono",  mics,     default_mic)
+    spk_var,  spk_idxs,  spk_names  = row("🔊  Altavoz",    speakers, default_spk)
 
-    print("\n  ✓ Configuración guardada en config.json")
-    print("═"*56 + "\n")
+    if webcams:
+        cam_var, cam_idxs, cam_names = row("📷  Cámara",    webcams, None)
+        cam_names[0] = "— sin cámara —"
+    else:
+        cam_var = cam_idxs = None
+        ttk.Label(root, text="📷  Cámara: no detectada", style="Sub.TLabel").pack(
+            anchor="w", padx=24, pady=(8, 2))
+
+    ttk.Label(root, text=f"🖥️  Pantalla: {screen_info}", style="Sub.TLabel").pack(
+        anchor="w", padx=24, pady=(10, 2))
+
+    webcam_send_var = tk.BooleanVar(value=False)
+    if webcams:
+        ttk.Checkbutton(root, text="Enviar imagen de webcam junto con la pantalla",
+                        variable=webcam_send_var).pack(anchor="w", padx=24, pady=(4, 8))
+
+    status_var = tk.StringVar(value="")
+    ttk.Label(root, textvariable=status_var, style="Sub.TLabel").pack(pady=2)
+
+    def on_save():
+        # leer selecciones
+        try:
+            mic_sel = mic_var.get()
+            cfg["mic_device"] = mic_idxs[mic_names.index(mic_sel)] if mic_sel in mic_names else None
+        except Exception:
+            cfg["mic_device"] = None
+        try:
+            spk_sel = spk_var.get()
+            cfg["speaker_device"] = spk_idxs[spk_names.index(spk_sel)] if spk_sel in spk_names else None
+        except Exception:
+            cfg["speaker_device"] = None
+        if cam_var and cam_idxs:
+            try:
+                cam_sel = cam_var.get()
+                cfg["webcam_device"] = cam_idxs[cam_names.index(cam_sel)]
+            except Exception:
+                cfg["webcam_device"] = None
+        else:
+            cfg["webcam_device"] = None
+
+        cfg["webcam_on_send"]   = webcam_send_var.get()
+        cfg["devices_detected"] = True
+        save_config(cfg)
+        status_var.set("✓ Guardado")
+        root.after(600, root.destroy)
+
+    ttk.Button(root, text="Guardar y continuar →",
+               style="Cyan.TButton", command=on_save).pack(pady=(12, 20))
+
+    root.lift()
+    root.attributes("-topmost", True)
+    root.mainloop()
     return cfg
 
 
@@ -199,22 +258,140 @@ def take_webcam_frame(cfg: dict) -> str:
         return ""
 
 
-# ── Auth: prompt inicial ──────────────────────────────────────────────────────
+# ── Auth GUI ──────────────────────────────────────────────────────────────────
+# Cola para comunicar resultado de auth desde hilo WS al hilo GUI
+_auth_result_queue: queue.Queue = queue.Queue()
+# Cola para enviar inputs del usuario al hilo WS
+_auth_input_queue:  queue.Queue = queue.Queue()
+
+
+def show_auth_gui(cfg: dict) -> bool:
+    """
+    Ventana GUI de login. Lanza el handshake WS en un hilo y muestra
+    los campos necesarios (email/pass → 2FA). Devuelve True si OK.
+    """
+    import tkinter as tk
+    import tkinter.ttk as ttk
+
+    result = {"ok": False}
+
+    root = tk.Tk()
+    root.title("J.A.R.V.I.S. — Acceso")
+    root.resizable(False, False)
+    _gui_style(root)
+
+    W, H = 400, 340
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"{W}x{H}+{(sw-W)//2}+{(sh-H)//2}")
+
+    ttk.Label(root, text="🤖  J.A.R.V.I.S.", style="Title.TLabel").pack(pady=(22, 2))
+    ttk.Label(root, text="Autenticación requerida", style="Sub.TLabel").pack(pady=(0, 16))
+
+    # ── campos email / password ───────────────────────────────────────────────
+    frame = ttk.Frame(root)
+    frame.pack(padx=30, fill="x")
+
+    ttk.Label(frame, text="Email").grid(row=0, column=0, sticky="w", pady=4)
+    email_var = tk.StringVar(value=cfg.get("last_email", "sistema@dominainternet.com"))
+    email_entry = ttk.Entry(frame, textvariable=email_var, width=34)
+    email_entry.grid(row=0, column=1, padx=(10, 0), pady=4)
+
+    ttk.Label(frame, text="Clave").grid(row=1, column=0, sticky="w", pady=4)
+    pass_var = tk.StringVar()
+    pass_entry = ttk.Entry(frame, textvariable=pass_var, show="●", width=34)
+    pass_entry.grid(row=1, column=1, padx=(10, 0), pady=4)
+
+    # ── campo código 2FA (oculto inicialmente) ────────────────────────────────
+    code_frame = ttk.Frame(root)
+    ttk.Label(code_frame, text="Código 2FA").grid(row=0, column=0, sticky="w", pady=4)
+    code_var = tk.StringVar()
+    code_entry = ttk.Entry(code_frame, textvariable=code_var, width=20,
+                            font=("Consolas", 16, "bold"))
+    code_entry.grid(row=0, column=1, padx=(10, 0), pady=4)
+
+    status_var = tk.StringVar(value="")
+    status_lbl = ttk.Label(root, textvariable=status_var, style="Sub.TLabel")
+    status_lbl.pack(pady=4)
+
+    btn = ttk.Button(root, text="Iniciar sesión →", style="Cyan.TButton")
+    btn.pack(pady=(6, 16))
+
+    phase = {"current": "login"}  # login → code → done
+
+    def check_queue():
+        """Polling cada 100ms para procesar respuestas del hilo WS."""
+        try:
+            msg = _auth_result_queue.get_nowait()
+        except queue.Empty:
+            if root.winfo_exists():
+                root.after(100, check_queue)
+            return
+
+        kind = msg.get("type", "")
+
+        if kind == "auth_code_required":
+            status_var.set("📧  Código enviado a tu correo")
+            frame.pack_forget()
+            code_frame.pack(padx=30, fill="x")
+            code_entry.focus()
+            btn.config(text="Verificar →")
+            phase["current"] = "code"
+
+        elif kind == "auth_ok":
+            token = msg.get("token", "")
+            if token:
+                cfg["session_token"] = token
+                cfg["last_email"] = email_var.get().strip()
+                save_config(cfg)
+            status_var.set("✓  Acceso concedido")
+            result["ok"] = True
+            root.after(700, root.destroy)
+            return
+
+        elif kind in ("auth_error", "auth_locked"):
+            status_var.set(f"✗  {msg.get('message', 'Error')}")
+            btn.config(state="normal")
+
+        elif kind == "connecting":
+            status_var.set("Conectando…")
+
+        if root.winfo_exists():
+            root.after(100, check_queue)
+
+    def on_action():
+        btn.config(state="disabled")
+        if phase["current"] == "login":
+            status_var.set("Verificando…")
+            _auth_input_queue.put({
+                "type":     "auth_init",
+                "email":    email_var.get().strip(),
+                "password": pass_var.get(),
+            })
+        else:
+            status_var.set("Verificando código…")
+            _auth_input_queue.put({"type": "auth_code", "code": code_var.get().strip()})
+
+    btn.config(command=on_action)
+    pass_entry.bind("<Return>", lambda e: on_action())
+    code_entry.bind("<Return>", lambda e: on_action())
+    email_entry.focus()
+
+    root.after(100, check_queue)
+    root.lift()
+    root.attributes("-topmost", True)
+    root.mainloop()
+    return result["ok"]
+
+
 def prompt_credentials() -> tuple[str, str]:
-    """Pide email y contraseña en terminal la primera vez."""
-    print("\n" + "═"*50)
-    print("  J.A.R.V.I.S. — Autenticación requerida")
-    print("═"*50)
+    """Fallback terminal (no debería usarse si hay GUI)."""
     import getpass
     email    = input("  Email    : ").strip()
-    password = getpass.getpass("  Password : ")
-    print("═"*50 + "\n")
+    password = getpass.getpass("  Clave    : ")
     return email, password
 
 def prompt_2fa_code() -> str:
-    print("\n[JARVIS] Código de verificación enviado a tu correo.")
-    code = input("  Introduce el código (6 dígitos): ").strip()
-    return code
+    return input("  Código 2FA: ").strip()
 
 # ── audio constants (openwakeword requiere 16 kHz int16 mono) ────────────────
 SAMPLE_RATE  = 16000
@@ -232,8 +409,9 @@ state      = State.IDLE
 paused     = False
 state_lock = threading.Lock()
 
-send_queue   : queue.Queue = queue.Queue()
-action_queue : queue.Queue = queue.Queue()
+send_queue        : queue.Queue = queue.Queue()
+action_queue      : queue.Queue = queue.Queue()
+_gui_request_queue: queue.Queue = queue.Queue()   # ws → main: solicitudes de GUI
 
 # ── pitido de activación ──────────────────────────────────────────────────────
 def beep(freq: int = 880, duration: float = 0.12, volume: float = 0.4):
@@ -407,7 +585,15 @@ async def _ws_async(cfg: dict):
                 log.info("WebSocket conectado")
 
                 # ── autenticación antes del bucle normal ──────────────────────
+                # Si no hay token, notificar al hilo principal para abrir GUI
+                needs_gui = not cfg.get("session_token")
+                if needs_gui:
+                    _gui_request_queue.put("show_auth")
+
                 authenticated = await _ws_auth(ws, cfg)
+                if needs_gui:
+                    _gui_request_queue.put("auth_done")
+
                 if not authenticated:
                     log.error("Autenticación fallida. Reintentando en 10s...")
                     await asyncio.sleep(10)
@@ -425,24 +611,21 @@ async def _ws_async(cfg: dict):
 
 async def _ws_auth(ws, cfg: dict) -> bool:
     """
-    Gestiona el handshake de autenticación.
-    Retorna True si queda autenticado.
+    Handshake de autenticación.
+    Si hay token válido → OK silencioso.
+    Si no → comunica con la GUI via colas (_auth_result_queue / _auth_input_queue).
     """
-    loop = asyncio.get_event_loop()
-
     # 1) Esperar auth_required del servidor
     try:
-        raw  = await asyncio.wait_for(ws.recv(), timeout=10)
-        msg  = json.loads(raw)
-        if msg.get("type") not in ("auth_required", "auth_need_login"):
-            # servidor sin auth (no debería pasar, pero por compatibilidad)
-            if msg.get("type") == "status":
-                return True
+        raw = await asyncio.wait_for(ws.recv(), timeout=10)
+        msg = json.loads(raw)
+        if msg.get("type") == "status":
+            return True   # servidor sin auth
     except asyncio.TimeoutError:
         log.error("Timeout esperando respuesta del servidor")
         return False
 
-    # 2) Intentar token guardado
+    # 2) Intentar token guardado (silencioso, sin GUI)
     token = cfg.get("session_token", "")
     if token:
         await ws.send(json.dumps({"type": "auth_token", "token": token}))
@@ -452,49 +635,39 @@ async def _ws_auth(ws, cfg: dict) -> bool:
             if resp.get("type") == "auth_ok":
                 log.info(f"Sesión restaurada para {resp.get('email')}")
                 return True
-            # token inválido → borrar y pedir credenciales
             cfg.pop("session_token", None)
             save_config(cfg)
         except asyncio.TimeoutError:
             pass
 
-    # 3) Pedir credenciales en terminal (fuera del event loop)
-    email, password = await loop.run_in_executor(None, prompt_credentials)
-    await ws.send(json.dumps({
-        "type": "auth_init", "email": email, "password": password
-    }))
+    # 3) Sin token válido → señalar a la GUI que muestre el login
+    _auth_result_queue.put({"type": "connecting"})
 
-    try:
-        raw  = await asyncio.wait_for(ws.recv(), timeout=15)
-        resp = json.loads(raw)
-    except asyncio.TimeoutError:
-        log.error("Timeout en auth_init")
-        return False
-
-    rtype = resp.get("type", "")
-
-    if rtype == "auth_error":
-        print(f"\n[JARVIS] {resp.get('message', 'Error de autenticación')}\n")
-        return False
-
-    if rtype == "auth_locked":
-        print(f"\n[JARVIS] CUENTA BLOQUEADA — {resp.get('message')}")
-        print("         Revisa tu correo para el enlace de desbloqueo.\n")
-        return False
-
-    if rtype == "auth_code_required":
-        # 4) Código 2FA
-        code = await loop.run_in_executor(None, prompt_2fa_code)
-        await ws.send(json.dumps({"type": "auth_code", "code": code}))
+    # bucle: recibir respuesta del servidor → enviar a GUI → GUI responde → reenviar al servidor
+    while True:
+        # esperar input del usuario desde la GUI (con timeout por si cierra la ventana)
+        loop = asyncio.get_event_loop()
         try:
-            raw  = await asyncio.wait_for(ws.recv(), timeout=15)
-            resp = json.loads(raw)
-        except asyncio.TimeoutError:
-            log.error("Timeout esperando verificación 2FA")
+            user_msg = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: _auth_input_queue.get(timeout=120)),
+                timeout=125,
+            )
+        except (asyncio.TimeoutError, Exception):
             return False
 
-        if resp.get("type") == "auth_ok":
-            # guardar token de sesión en config
+        await ws.send(json.dumps(user_msg))
+
+        try:
+            raw  = await asyncio.wait_for(ws.recv(), timeout=20)
+            resp = json.loads(raw)
+        except asyncio.TimeoutError:
+            _auth_result_queue.put({"type": "auth_error", "message": "Timeout del servidor"})
+            return False
+
+        rtype = resp.get("type", "")
+        _auth_result_queue.put(resp)
+
+        if rtype == "auth_ok":
             new_token = resp.get("token", "")
             if new_token:
                 cfg["session_token"] = new_token
@@ -502,7 +675,10 @@ async def _ws_auth(ws, cfg: dict) -> bool:
                 log.info("Token de sesión guardado (válido 30 días)")
             return True
 
-        print(f"\n[JARVIS] {resp.get('message', 'Código incorrecto')}\n")
+        if rtype in ("auth_locked",):
+            return False
+
+        # auth_error o auth_code_required → la GUI mostrará el siguiente campo
         return False
 
     if rtype == "auth_ok":
@@ -727,22 +903,14 @@ def main():
     if not CONFIG_FILE.exists():
         save_config(cfg)
 
-    # ── detección de dispositivos (solo si nunca se ha hecho) ────────────────
+    # ── detección de dispositivos: GUI (solo si nunca se ha hecho) ──────────
     if not cfg.get("devices_detected", False):
         cfg = detect_devices(cfg)
 
-    log.info("═══════════════════════════════")
-    log.info("  Omni-Jarvis v2 — arrancando  ")
-    log.info("═══════════════════════════════")
     log.info(f"Servidor : {cfg['server_ip']}:{cfg['server_port']}")
-    log.info(f"Wake word: 'Jarvis'")
-    log.info(f"Micrófono: {cfg.get('mic_device', 'defecto')}")
-    log.info(f"Altavoz  : {cfg.get('speaker_device', 'defecto')}")
-    log.info(f"Webcam   : {cfg.get('webcam_device') if cfg.get('webcam_device') is not None else 'no'}")
-    log.info(f"Pantalla : {'sí' if cfg.get('screenshot_on_send') else 'no'}")
-    log.info(f"Wake word: {cfg.get('wakeword_model', 'hey_jarvis')} (umbral {cfg.get('wakeword_threshold', 0.5)})")
+    log.info(f"Modelo   : {cfg.get('wakeword_model', 'hey_jarvis')} (umbral {cfg.get('wakeword_threshold', 0.5)})")
 
-    # arrancar hilos
+    # ── arrancar hilos de audio, WS y acciones ────────────────────────────────
     threads = [
         threading.Thread(target=audio_loop,  args=(cfg,), daemon=True, name="audio"),
         threading.Thread(target=ws_loop,     args=(cfg,), daemon=True, name="websocket"),
@@ -750,19 +918,51 @@ def main():
     ]
     for t in threads:
         t.start()
-        log.info(f"Hilo '{t.name}' iniciado")
 
-    # pystray DEBE correr en el hilo principal (requisito de macOS y Windows)
+    # ── gestionar GUI de auth si el WS la solicita (hilo principal) ──────────
+    # Antes de lanzar pystray, atender posibles peticiones de GUI de login
+    auth_shown = False
+    deadline = time.monotonic() + 15   # esperar max 15s a que WS inicie
+    while time.monotonic() < deadline:
+        try:
+            req = _gui_request_queue.get(timeout=0.3)
+            if req == "show_auth" and not auth_shown:
+                auth_shown = True
+                show_auth_gui(cfg)
+            elif req == "auth_done":
+                break
+        except queue.Empty:
+            # si ya hay token en config, no hay GUI que esperar
+            if cfg.get("session_token"):
+                break
+
+    # ── pystray en hilo principal ─────────────────────────────────────────────
     icon = create_tray(cfg)
     if icon:
-        log.info("Icono en bandeja del sistema activo")
-        icon.run()        # bloquea hasta que el usuario elija 'Salir'
+        log.info("Sistema activo — di 'Jarvis' para activar")
+        # mientras pystray corre, seguir atendiendo peticiones de GUI de re-login
+        def tray_runner():
+            icon.run()
+        tray_t = threading.Thread(target=tray_runner, daemon=True)
+        tray_t.start()
+        # bucle principal: atiende re-autenticaciones si el token expira
+        while tray_t.is_alive():
+            try:
+                req = _gui_request_queue.get(timeout=1)
+                if req == "show_auth":
+                    show_auth_gui(cfg)
+            except queue.Empty:
+                pass
     else:
-        # sin tray: esperar indefinidamente (Ctrl-C para salir)
         log.info("Sin bandeja — Ctrl-C para salir")
         try:
             while True:
-                time.sleep(1)
+                try:
+                    req = _gui_request_queue.get(timeout=1)
+                    if req == "show_auth":
+                        show_auth_gui(cfg)
+                except queue.Empty:
+                    pass
         except KeyboardInterrupt:
             log.info("Detenido.")
 
