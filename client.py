@@ -677,11 +677,11 @@ async def _ws_auth(ws, cfg: dict) -> bool:
                 log.info("Token de sesión guardado (válido 30 días)")
             return True
 
-        if rtype in ("auth_locked",):
+        if rtype in ("auth_locked", "auth_error"):
             return False
 
-        # auth_error o auth_code_required → la GUI mostrará el siguiente campo
-        return False
+        # auth_code_required → continuar el bucle para recibir el código 2FA de la GUI
+        # (no hacer return aquí — la GUI enviará auth_code a _auth_input_queue)
 
     if rtype == "auth_ok":
         token = resp.get("token", "")
