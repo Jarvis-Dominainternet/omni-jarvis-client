@@ -567,7 +567,7 @@ def stop_watch_mode():
     global _watch_mode
     with _watch_lock:
         _watch_mode = False
-        _watch_shots.clear()
+        # no borramos _watch_shots aquí — el usuario puede preguntar tras stop
     log.info("Modo observación desactivado")
 
 
@@ -754,10 +754,11 @@ async def _ws_async(cfg: dict):
                 )
         except Exception as e:
             log.warning(f"WebSocket desconectado: {e}. Reintentando en 5s...")
-            # vaciar send_queue para no enviar grabaciones antiguas tras reconectar
-            while not send_queue.empty():
-                try: send_queue.get_nowait()
-                except queue.Empty: break
+            # vaciar colas para no ejecutar acciones/grabaciones antiguas tras reconectar
+            for q in (send_queue, action_queue):
+                while True:
+                    try: q.get_nowait()
+                    except queue.Empty: break
             with state_lock:
                 global state
                 state = State.IDLE
@@ -911,11 +912,15 @@ def action_loop():
             # reproducir audio de Jarvis
             tmp = None
             try:
-                raw_b64 = msg.get("data") or msg.get("content", "")
-                if not raw_b64:
-                    log.warning("Mensaje audio sin datos")
+                raw_b64 = msg.get("data") or msg.get("content") or ""
+                if not raw_b64 or not isinstance(raw_b64, str):
+                    log.warning("Mensaje audio vacío o inválido")
                     continue
-                data = base64.b64decode(raw_b64)
+                try:
+                    data = base64.b64decode(raw_b64)
+                except Exception:
+                    log.warning("Mensaje audio con base64 inválido")
+                    continue
                 with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
                     f.write(data)
                     tmp = f.name
@@ -936,7 +941,13 @@ def action_loop():
         elif mtype in ("action", "actions"):
             acts = msg.get("actions", [msg] if mtype == "action" else [])
             for act in acts:
-                _execute_action(act, pyautogui)
+                try:
+                    _execute_action(act, pyautogui)
+                except pyautogui.FailSafeException:
+                    log.warning("FailSafe activado (ratón en esquina) — acciones detenidas")
+                    break
+                except Exception as e:
+                    log.warning(f"_execute_action error: {e}")
                 time.sleep(act.get("delay", 0.1))
 
 
@@ -968,7 +979,10 @@ def _execute_action(act: dict, pyautogui):
             pyautogui.write(tx, interval=0.04)
     elif t == "key" and tx:
         log.info(f"  → key: {tx}")
-        pyautogui.hotkey(*tx.split("+"))
+        try:
+            pyautogui.hotkey(*tx.split("+"))
+        except Exception as e:
+            log.warning(f"  hotkey error '{tx}': {e}")
     elif t == "scroll" and x is not None:
         pyautogui.scroll(act.get("clicks", 3), x=x, y=y)
 
@@ -995,7 +1009,9 @@ def _execute_action(act: dict, pyautogui):
                     f.write(html)
                     tmp_path = f.name
                 log.info(f"  → show_html: {tmp_path} ({len(html)} bytes)")
-                webbrowser.open(f"file://{tmp_path}")
+                # En Windows la ruta necesita format file:///C:/...
+                uri = tmp_path if sys.platform != "win32" else tmp_path.replace("\\", "/")
+                webbrowser.open(f"file:///{uri}")
                 # limpiar tras 30s (navegador ya habrá cargado el archivo)
                 def _cleanup(p):
                     time.sleep(30)
