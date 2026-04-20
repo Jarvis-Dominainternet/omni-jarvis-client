@@ -913,18 +913,27 @@ async def _ws_sender(ws):
 
 async def _ws_receiver(ws):
     """Recibe respuestas del servidor y las pone en action_queue."""
-    global state
+    global state, _last_text
     async for raw in ws:
         try:
             msg = json.loads(raw)
             mtype = msg.get("type", "")
 
+            # transcription = lo que el usuario dijo (eco de STT)
+            # → mostrar en panel pero NO resetear a IDLE, Jarvis sigue pensando
+            if mtype == "transcription":
+                with _last_text_lock:
+                    _last_text = f"Tú: {msg.get('content', '')}"
+                log.info(f"STT: {msg.get('content', '')}")
+                continue
+
             if mtype in ("audio", "actions", "action", "text"):
                 action_queue.put(msg)
 
+            # Solo resetear a IDLE cuando llega la respuesta real de Jarvis
             if mtype in ("audio", "text", "actions", "action"):
                 with state_lock:
-                    state = State.IDLE   # listo para siguiente comando
+                    state = State.IDLE
                 log.info(f"Respuesta recibida ({mtype}) → volviendo a IDLE")
 
         except Exception as e:
@@ -1708,7 +1717,24 @@ class JarvisControlPanel:
 
     def _to_tray(self):
         self.root.withdraw()
-        self._start_tray()
+        if not self._tray_icon:
+            self._start_tray()
+
+    def _show_from_tray(self):
+        """Trae la ventana a primer plano, asegurándose de que esté en pantalla."""
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x, y = self._px, self._py
+        # si está fuera de pantalla, reposicionar en esquina superior derecha
+        if x < 0 or x > sw - 20 or y < 0 or y > sh - 20:
+            x = sw - self.W - 20
+            y = 20
+            self._px, self._py = x, y
+        h = self.H_FULL if self._expanded else self.H_MINI
+        self.root.geometry(f"{self.W}x{h}+{x}+{y}")
+        self.root.deiconify()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
 
     def _start_tray(self):
         try:
@@ -1727,10 +1753,11 @@ class JarvisControlPanel:
             return img
 
         def _show(icon, _):
-            icon.stop()
-            self._tray_icon = None
-            self.root.deiconify()
-            self.root.lift()
+            # Mostrar sin destruir el icono — doble click en bandeja = toggle
+            self.root.after(0, self._show_from_tray)
+
+        def _hide(icon, _):
+            self.root.after(0, self.root.withdraw)
 
         def _quit(icon, _):
             icon.stop()
@@ -1740,6 +1767,7 @@ class JarvisControlPanel:
             "jarvis", _mk(), "J.A.R.V.I.S.",
             pystray.Menu(
                 pystray.MenuItem("Mostrar", _show, default=True),
+                pystray.MenuItem("Ocultar", _hide),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Salir", _quit),
             ))
