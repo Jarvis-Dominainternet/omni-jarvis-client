@@ -1,0 +1,6 @@
+# Config local del usuario (tiene IP, token de sesión, dispositivos — no compartir)
+config.json
+jarvis.pid
+jarvis.log
+__pycache__/
+*.pyc
