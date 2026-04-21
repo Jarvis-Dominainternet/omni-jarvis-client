@@ -524,8 +524,13 @@ def take_screenshot() -> str:
             monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
             img = sct.grab(monitor)
             pil = Image.frombytes("RGB", img.size, img.bgra, "raw", "BGRX")
+        # Reducir a max 1280px ancho — suficiente para visión, mucho menos tokens
+        max_w = 1280
+        if pil.width > max_w:
+            ratio = max_w / pil.width
+            pil = pil.resize((max_w, int(pil.height * ratio)), Image.LANCZOS)
         buf = io.BytesIO()
-        pil.save(buf, format="JPEG", quality=75)
+        pil.save(buf, format="JPEG", quality=70)
         return base64.b64encode(buf.getvalue()).decode()
     except Exception as e:
         log.error(f"Screenshot error: {e}")
