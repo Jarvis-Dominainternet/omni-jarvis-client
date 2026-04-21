@@ -388,7 +388,7 @@ def show_auth_gui(cfg: dict) -> bool:
             frame.pack_forget()
             code_frame.pack(padx=30, fill="x")
             code_entry.focus()
-            btn.config(text="Verificar →")
+            btn.config(text="Verificar →", state="normal")
             phase["current"] = "code"
 
         elif kind == "auth_ok":
